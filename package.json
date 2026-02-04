@@ -1,0 +1,43 @@
+{
+  "name": "smpp-js-sdk",
+  "version": "1.0.0",
+  "description": "SMPP v5.0 client with auto-reconnect, queue management, and TLS support",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "rebuild": "npm run clean && npm run build",
+    "watch": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx examples/localhost-transceiver.ts",
+    "example": "tsx examples/aws-ssm-tunnel.ts",
+    "example:production": "tsx examples/production-example.ts",
+    "example:optional": "tsx examples/optional-operations-example.ts"
+  },
+  "keywords": [
+    "smpp",
+    "sms",
+    "messaging",
+    "typescript"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}

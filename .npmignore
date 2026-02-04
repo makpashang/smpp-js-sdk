@@ -1,0 +1,21 @@
+# Source files
+src/
+examples/
+SMPP_v5.rtf
+
+# Build config
+tsconfig.json
+.gitignore
+
+# Development
+node_modules/
+*.log
+.DS_Store
+
+# Keep these
+!dist/
+!docs/
+!README.md
+!LICENSE
+!package.json
+!CHANGELOG.md
