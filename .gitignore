@@ -42,3 +42,4 @@ temp/
 # Project-specific ignores
 ignore/
 
+DO-NOT-UPLOAD/*
