@@ -43,13 +43,19 @@ export enum CommandId {
 // Command Status (Error Codes)
 /**
  * Command Status Codes (SMPP v5 Spec Table 4-45)
- * Complete list of all 67 status codes
+ *
+ * The full set of 67 standard command_status values defined by SMPP v5.0.
+ * Values are exactly as assigned in Table 4-45 - note that several v3.4-era
+ * codes (e.g. invalid DCS, source/dest address subunit) were re-assigned to
+ * the 0x104-0x106 range in v5, and the 0x107-0x112 block is reserved for the
+ * Cell Broadcast operations. Reserved gaps in the spec (e.g. 0x09, 0x10, 0x12,
+ * 0x16-0x17, 0x46-0x47, 0x4A) are intentionally not declared here.
  */
 export enum CommandStatus {
   // Success
   ESME_ROK = 0x00000000, // No Error
-  
-  // Protocol Errors (0x00000001-0x0000000F)
+
+  // Protocol / bind errors (0x01-0x0F)
   ESME_RINVMSGLEN = 0x00000001, // Message Length is invalid
   ESME_RINVCMDLEN = 0x00000002, // Command Length is invalid
   ESME_RINVCMDID = 0x00000003, // Invalid Command ID
@@ -58,84 +64,84 @@ export enum CommandStatus {
   ESME_RINVPRTFLG = 0x00000006, // Invalid Priority Flag
   ESME_RINVREGDLVFLG = 0x00000007, // Invalid Registered Delivery Flag
   ESME_RSYSERR = 0x00000008, // System Error
-  ESME_RINVPRIFLG = 0x00000009, // Invalid Priority Flag (alternative code)
-  
-  // Bind Errors (0x0000000A-0x0000000F)
   ESME_RINVSRCADR = 0x0000000a, // Invalid Source Address
   ESME_RINVDSTADR = 0x0000000b, // Invalid Dest Addr
   ESME_RINVMSGID = 0x0000000c, // Message ID is invalid
   ESME_RBINDFAIL = 0x0000000d, // Bind Failed
   ESME_RINVPASWD = 0x0000000e, // Invalid Password
   ESME_RINVSYSID = 0x0000000f, // Invalid System ID
-  ESME_RINVREGDEL = 0x00000010, // Invalid Registered Delivery Flag (alt)
-  
-  // Operation Errors (0x00000011-0x00000017)
+
+  // Operation errors (0x11-0x15)
   ESME_RCANCELFAIL = 0x00000011, // Cancel SM Failed
-  ESME_RINVSCHEDTM = 0x00000012, // Invalid Scheduled Delivery Time
   ESME_RREPLACEFAIL = 0x00000013, // Replace SM Failed
   ESME_RMSGQFUL = 0x00000014, // Message Queue Full
   ESME_RINVSERTYP = 0x00000015, // Invalid Service Type
-  ESME_RINVNUMDESTS_ALT = 0x00000016, // Invalid number of destinations (alt)
-  ESME_RINVDLNAME_ALT = 0x00000017, // Invalid Distribution List name (alt)
-  
-  // Address/TON/NPI Errors (0x00000033-0x00000051)
+
+  // submit_multi / address / TON / NPI errors (0x33-0x51)
   ESME_RINVNUMDESTS = 0x00000033, // Invalid number of destinations
   ESME_RINVDLNAME = 0x00000034, // Invalid Distribution List name
-  ESME_RINVDESTFLAG = 0x00000040, // Destination flag is invalid
+  ESME_RINVDESTFLAG = 0x00000040, // Destination flag is invalid (submit_multi)
   ESME_RINVSUBREP = 0x00000042, // Invalid submit with replace request
   ESME_RINVESMCLASS = 0x00000043, // Invalid esm_class field data
   ESME_RCNTSUBDL = 0x00000044, // Cannot Submit to Distribution List
-  ESME_RSUBMITFAIL = 0x00000045, // submit_sm or submit_multi failed
-  ESME_RINVDCS = 0x00000046, // Invalid Data Coding Scheme
-  ESME_RINVSRCADDRSUBUNIT = 0x00000047, // Invalid Source Address Subunit
+  ESME_RSUBMITFAIL = 0x00000045, // submit_sm, data_sm or submit_multi failed
   ESME_RINVSRCTON = 0x00000048, // Invalid Source address TON
   ESME_RINVSRCNPI = 0x00000049, // Invalid Source address NPI
-  ESME_RINVDESTADDRSUBUNIT = 0x0000004a, // Invalid Destination Address Subunit
   ESME_RINVDSTTON = 0x00000050, // Invalid Destination address TON
   ESME_RINVDSTNPI = 0x00000051, // Invalid Destination address NPI
-  
-  // System Type/Configuration Errors (0x00000053-0x00000055)
+
+  // System type / config errors (0x53-0x55)
   ESME_RINVSYSTYP = 0x00000053, // Invalid system_type field
   ESME_RINVREPFLAG = 0x00000054, // Invalid replace_if_present flag
   ESME_RINVNUMMSGS = 0x00000055, // Invalid number of messages
-  
-  // Throttling (0x00000058)
+
+  // Throttling (0x58)
   ESME_RTHROTTLED = 0x00000058, // Throttling error (ESME has exceeded allowed message limits)
-  
-  // Scheduling Errors (0x00000061-0x00000063)
+
+  // Scheduling errors (0x61-0x63)
   ESME_RINVSCHED = 0x00000061, // Invalid Scheduled Delivery Time
   ESME_RINVEXPIRY = 0x00000062, // Invalid message validity period (Expiry time)
   ESME_RINVDFTMSGID = 0x00000063, // Predefined Message Invalid or Not Found
-  
-  // Application Errors (0x00000064-0x00000067)
+
+  // Application errors (0x64-0x67)
   ESME_RX_T_APPN = 0x00000064, // ESME Receiver Temporary App Error Code
   ESME_RX_P_APPN = 0x00000065, // ESME Receiver Permanent App Error Code
   ESME_RX_R_APPN = 0x00000066, // ESME Receiver Reject Message Error Code
   ESME_RQUERYFAIL = 0x00000067, // query_sm request failed
-  
-  // TLV Errors (0x000000C0-0x000000C4)
+
+  // TLV errors (0xC0-0xC4)
   ESME_RINVTLVSTREAM = 0x000000c0, // Error in the optional part of the PDU Body
   ESME_RTLVNOTALLWD = 0x000000c1, // TLV not allowed
   ESME_RINVTLVLEN = 0x000000c2, // Invalid Parameter Length
   ESME_RMISSINGTLV = 0x000000c3, // Expected TLV missing
   ESME_RINVTLVVAL = 0x000000c4, // Invalid TLV Value
-  
-  // Delivery Errors (0x000000FE-0x000000FF)
-  ESME_RDELIVERYFAILURE = 0x000000fe, // Delivery Failure (used for data_sm_resp)
+
+  // Delivery / unknown (0xFE-0xFF)
+  ESME_RDELIVERYFAILURE = 0x000000fe, // Transaction Delivery Failure (data_sm/submit_sm transaction mode)
   ESME_RUNKNOWNERR = 0x000000ff, // Unknown Error
-  
-  // Vendor-specific and additional errors (0x00000100+)
-  ESME_RPROHIBITED = 0x00000100, // Operation not permitted/prohibited
-  ESME_RSERTYPUNAUTH = 0x00000101, // Service type unauthorized
-  ESME_RPROHIBITED_DEST = 0x00000102, // Prohibited destination address
-  ESME_RSUBMITFAIL_SVCUNAVAIL = 0x00000103, // Submit failed, service unavailable
-  ESME_RSUBMITFAIL_BLOCKED = 0x00000104, // Submit failed, blocked destination
-  ESME_RINVDATACODINGSCHEME = 0x00000105, // Invalid data coding scheme
-  ESME_RINVSRCADDRTYPEREQ = 0x00000106, // Invalid source address type
-  ESME_RINVDSTADDRTYPEREQ = 0x00000107, // Invalid destination address type
-  ESME_RINVNUMMSGS_TOOLARGE = 0x00000108, // Too many messages
-  ESME_RINVALITYPERIOD = 0x00000109, // Invalid validity period
-  ESME_RINVSCHEDULETIME = 0x0000010a, // Invalid schedule time
+
+  // service_type, DCS, address-subunit errors (0x100-0x106)
+  ESME_RSERTYPUNAUTH = 0x00000100, // ESME Not authorised to use specified service_type
+  ESME_RPROHIBITED = 0x00000101, // ESME Prohibited from using specified operation
+  ESME_RSERTYPUNAVAIL = 0x00000102, // Specified service_type is unavailable
+  ESME_RSERTYPDENIED = 0x00000103, // Specified service_type is denied
+  ESME_RINVDCS = 0x00000104, // Invalid Data Coding Scheme
+  ESME_RINVSRCADDRSUBUNIT = 0x00000105, // Source Address Sub unit is Invalid
+  ESME_RINVDSTADDRSUBUNIT = 0x00000106, // Destination Address Sub unit is Invalid
+
+  // Cell Broadcast errors (0x107-0x112)
+  ESME_RINVBCASTFREQINT = 0x00000107, // Broadcast Frequency Interval is invalid
+  ESME_RINVBCASTALIAS_NAME = 0x00000108, // Broadcast Alias Name is invalid
+  ESME_RINVBCASTAREAFMT = 0x00000109, // Broadcast Area Format is invalid
+  ESME_RINVNUMBCAST_AREAS = 0x0000010a, // Number of Broadcast Areas is invalid
+  ESME_RINVBCASTCNTTYPE = 0x0000010b, // Broadcast Content Type is invalid
+  ESME_RINVBCASTMSGCLASS = 0x0000010c, // Broadcast Message Class is invalid
+  ESME_RBCASTFAIL = 0x0000010d, // broadcast_sm operation failed
+  ESME_RBCASTQUERYFAIL = 0x0000010e, // query_broadcast_sm operation failed
+  ESME_RBCASTCANCELFAIL = 0x0000010f, // cancel_broadcast_sm operation failed
+  ESME_RINVBCAST_REP = 0x00000110, // Number of Repeated Broadcasts is invalid
+  ESME_RINVBCASTSRVGRP = 0x00000111, // Broadcast Service Group is invalid
+  ESME_RINVBCASTCHANIND = 0x00000112, // Broadcast Channel Indicator is invalid
 }
 
 // TON (Type of Number)
@@ -166,88 +172,64 @@ export enum NPI {
 // ESM Class
 /**
  * ESM Class - Bit mask field (SMPP v5 Spec Section 4.7.12, Table 4-48)
- * 
- * ESM Class is an 8-bit field that indicates message mode and features.
- * 
- * Bit Layout:
- * ┌───┬───┬───┬───┬───┬───┬───┬───┐
- * │ 7 │ 6 │ 5 │ 4 │ 3 │ 2 │ 1 │ 0 │
- * └───┴───┴───┴───┴───┴───┴───┴───┘
- *   │   │   │   │   │   │   └─┴───── Bits 0-1: Messaging Mode
- *   │   │   │   │   │   └─────────── Bit 2: MC Delivery Receipt
- *   │   │   │   └───┴─────────────── Bits 3-5: SME-originated Acknowledgement
- *   │   └─────────────────────────── Bit 6: Intermediate Notification
- *   └─────────────────────────────── Bit 7: Reserved/GSM Network Specific
- * 
- * Detailed Bit Fields:
- * 
- * Bits 0-1: Message Mode
- *   00 (0x00) - Default SMSC Mode (store and forward)
- *   01 (0x01) - Datagram mode
- *   10 (0x02) - Forward (transaction) mode
- *   11 (0x03) - Store and Forward mode (explicit)
- * 
- * Bit 2: MC Delivery Receipt
- *   0 - No MC Delivery Receipt requested (default)
- *   1 - MC Delivery Receipt requested or MC Delivery Receipt
- * 
- * Bits 3-4: SME Originated Acknowledgement (SMPP v3.4+)
- *   00 - No recipient SME acknowledgement requested (default)
- *   01 - SME Delivery Acknowledgement requested
- *   10 - SME Manual/User Acknowledgement requested
- *   11 - Both Delivery and Manual/User Acknowledgement requested
- * 
- * Bit 5: Intermediate Notification (SMPP v3.4+)
- *   0 - No intermediate notification (default)
- *   1 - Intermediate notification requested
- * 
- * Bit 6: GSM Network Specific Features (SMPP v3.4+)
- *   Used for ANSI-41 and GSM specific features
- *   0 - No GSM network specific features
- *   1 - GSM network specific features enabled
- * 
- * Bit 7: Reserved
- *   Should be set to 0
- * 
- * Common Combinations:
- *   0x00 - Default message (no receipt)
- *   0x04 - Request delivery receipt
- *   0x0C - Request delivery receipt + SME delivery ack
- *   0x14 - Request delivery receipt + SME manual ack
- *   0x1C - Request delivery receipt + both SME acks
+ *
+ * 8-bit field laid out as three sub-fields (bit 7 is the MSB):
+ *
+ *   Bits 1-0  Messaging Mode
+ *     00 (0x00) Default MC Mode (e.g. Store and Forward)
+ *     01 (0x01) Datagram mode
+ *     10 (0x02) Forward (i.e. Transaction) mode
+ *     11 (0x03) Store and Forward mode
+ *
+ *   Bits 5-2  Message Type / ANSI-41 (mutually-exclusive code points, NOT OR-able sub-flags)
+ *     0000      Default message type (normal message)
+ *     0001 0x04 Short Message contains MC Delivery Receipt        (bit 2)
+ *     1000 0x20 Short Message contains Intermediate Notification  (bit 5)
+ *     0010 0x08 Short Message contains Delivery Acknowledgement   (bit 3, ANSI-41)
+ *     0100 0x10 Short Message contains Manual/User Acknowledgement(bit 4, ANSI-41)
+ *     0110 0x18 Short Message contains Conversation Abort         (Korean CDMA)
+ *
+ *   Bits 7-6  GSM Specific
+ *     00        No specific features selected
+ *     01 (0x40) UDH Indicator (message contains a User Data Header)
+ *     10 (0x80) Set Reply Path (GSM only)
+ *     11 (0xC0) Set UDHI and Reply Path (GSM only)
+ *
+ * The default setting of esm_class is 0x00.
  */
 export const ESMClass = {
-  // Messaging Mode (bits 0-1)
-  MODE_DEFAULT: 0x00,           // 00000000 - Default SMSC mode (store and forward)
-  MODE_DATAGRAM: 0x01,          // 00000001 - Datagram mode
-  MODE_FORWARD: 0x02,           // 00000010 - Forward (i.e. Transaction) mode
-  MODE_STORE_FORWARD: 0x03,     // 00000011 - Store and Forward mode
-  
-  // MC Delivery Receipt (bit 2)
-  MC_DELIVERY_RECEIPT: 0x04,    // 00000100 - Request MC Delivery Receipt
-  
-  // SME-originated Acknowledgement (bits 3-4)
-  SME_DELIVERY_ACK: 0x08,       // 00001000 - SME Delivery Acknowledgement requested
-  SME_MANUAL_ACK: 0x10,         // 00010000 - SME Manual/User Acknowledgement requested
-  SME_BOTH_ACK: 0x18,           // 00011000 - Both Delivery and Manual/User Ack requested
-  
-  // Intermediate Notification (bit 5)
-  INTERMEDIATE_NOTIFICATION: 0x20, // 00100000 - Intermediate delivery notification requested
-  
-  // GSM Network Specific (bit 6)
-  GSM_NETWORK_SPECIFIC: 0x40,   // 01000000 - GSM/ANSI-41 specific features
-  
-  // Helper function to combine flags
+  // Messaging Mode (bits 1-0)
+  MODE_DEFAULT: 0x00,           // Default MC mode (store and forward)
+  MODE_DATAGRAM: 0x01,          // Datagram mode
+  MODE_FORWARD: 0x02,           // Forward (i.e. Transaction) mode
+  MODE_STORE_FORWARD: 0x03,     // Store and Forward mode
+
+  // Message Type (bits 5-2) - select at most one
+  MC_DELIVERY_RECEIPT: 0x04,         // Short Message contains MC Delivery Receipt
+  INTERMEDIATE_NOTIFICATION: 0x20,   // Short Message contains Intermediate Notification
+  DELIVERY_ACKNOWLEDGEMENT: 0x08,    // ANSI-41: Delivery Acknowledgement
+  MANUAL_USER_ACKNOWLEDGEMENT: 0x10, // ANSI-41: Manual/User Acknowledgement
+  CONVERSATION_ABORT: 0x18,          // Korean CDMA: Conversation Abort
+
+  // GSM Specific (bits 7-6)
+  UDH_INDICATOR: 0x40,          // User Data Header present
+  REPLY_PATH: 0x80,             // Set Reply Path (GSM only)
+  UDHI_AND_REPLY_PATH: 0xc0,    // Set UDHI and Reply Path (GSM only)
+
+  // Helper to combine flags
   combine: (...flags: number[]) => flags.reduce((a, b) => a | b, 0),
-  
-  // Helper function to check if delivery receipt is requested
+
+  // Helper to check if an MC delivery receipt is indicated (bit 2)
   hasDeliveryReceipt: (esmClass: number) => (esmClass & 0x04) !== 0,
-  
-  // Helper function to get messaging mode
+
+  // Helper to get messaging mode (bits 1-0)
   getMessagingMode: (esmClass: number) => esmClass & 0x03,
-  
-  // Helper function to check if intermediate notification is requested
+
+  // Helper to check if intermediate notification is indicated (bit 5)
   hasIntermediateNotification: (esmClass: number) => (esmClass & 0x20) !== 0,
+
+  // Helper to check if a User Data Header is present (bit 6)
+  hasUDHI: (esmClass: number) => (esmClass & 0x40) !== 0,
 } as const;
 
 // Type for ESM Class values
@@ -263,35 +245,27 @@ export enum ESMClassLegacy {
 }
 
 /**
- * Registered Delivery - Bit mask field (SMPP v5 Spec Section 4.7.21)
- * 
- * Registered Delivery is an 8-bit field that requests delivery receipts and acknowledgements.
- * 
- * Bit Layout:
- * ┌───┬───┬───┬───┬───┬───┬───┬───┐
- * │ 7 │ 6 │ 5 │ 4 │ 3 │ 2 │ 1 │ 0 │
- * └───┴───┴───┴───┴───┴───┴───┴───┘
- *   │   │   │   │   └───┴───┴─────── Bits 0-1: MC Delivery Receipt
- *   │   │   │   └───────────────---- Bits 2-3: SME Originated Acknowledgement
- *   │   │   └───────────────────---- Bit 4: (Reserved - part of SME ack)
- *   │   └───────────────────────---- Bit 5: Intermediate Notification
- *   └───┴───────────────────────---- Bits 6-7: Reserved
- * 
- * Bits 0-1: MC Delivery Receipt
- *   00 (0x00) - No MC Delivery Receipt requested (default)
- *   01 (0x01) - MC Delivery Receipt requested (success and failure)
- *   10 (0x02) - MC Delivery Receipt requested on failure only
- *   11 (0x03) - MC Delivery Receipt requested on success only
- * 
- * Bits 2-3: SME Originated Acknowledgement
- *   00 (0x00) - No recipient SME acknowledgement requested (default)
- *   01 (0x04) - SME Delivery Acknowledgement requested
- *   10 (0x08) - SME Manual/User Acknowledgement requested
- *   11 (0x0C) - Both Delivery and Manual Acknowledgement requested
- * 
- * Bit 5: Intermediate Notification
- *   0 (0x00) - Intermediate notification not requested (default)
- *   1 (0x10) - Intermediate notification requested
+ * Registered Delivery - Bit mask field (SMPP v5 Spec Section 4.7.21, Table 4-52)
+ *
+ * 8-bit field that requests delivery receipts and acknowledgements (bit 7 is the MSB):
+ *
+ *   Bits 1-0  MC Delivery Receipt
+ *     00 (0x00) No MC Delivery Receipt requested (default)
+ *     01 (0x01) MC Delivery Receipt requested on success and failure
+ *     10 (0x02) MC Delivery Receipt requested on failure only
+ *     11 (0x03) MC Delivery Receipt requested on success only
+ *
+ *   Bits 3-2  SME Originated Acknowledgement
+ *     00 (0x00) No recipient SME acknowledgement requested (default)
+ *     01 (0x04) SME Delivery Acknowledgement requested
+ *     10 (0x08) SME Manual/User Acknowledgement requested
+ *     11 (0x0C) Both Delivery and Manual/User Acknowledgement requested
+ *
+ *   Bit 4     Intermediate Notification
+ *     0 (0x00)  Intermediate notification not requested (default)
+ *     1 (0x10)  Intermediate notification requested
+ *
+ *   Bits 7-5  Reserved (set to 0)
  */
 export const RegisteredDelivery = {
   // MC Delivery Receipt (bits 0-1)
@@ -305,7 +279,7 @@ export const RegisteredDelivery = {
   SME_MANUAL_ACK: 0x08,       // 00001000 - SME Manual/User Acknowledgement
   SME_BOTH_ACK: 0x0c,         // 00001100 - Both acknowledgements
   
-  // Intermediate Notification (bit 5)
+  // Intermediate Notification (bit 4)
   INTERMEDIATE_NOTIF: 0x10,   // 00010000 - Intermediate notification
   
   // Helper function to combine flags
@@ -328,28 +302,14 @@ export const RegisteredDelivery = {
 export type RegisteredDeliveryValue = number;
 
 /**
- * Broadcast Area Format Types (SMPP v5 Spec Section 4.8.4.4.1)
- * Used in broadcast_area_identifier TLV for Cell Broadcast operations
+ * Broadcast Area Format Types (SMPP v5 Spec Table 4-65)
+ * First octet of the broadcast_area_identifier TLV value.
+ * The spec defines exactly three values; all others are reserved.
  */
 export enum BroadcastAreaFormat {
-  // Generic area formats
-  ALIAS_NAME = 0x00,          // Alias name for broadcast area
-  ELLIPSOID_ARC = 0x01,       // Ellipsoid arc (center point + radius)
-  POLYGON = 0x02,             // Polygon area (series of coordinates)
-  
-  // GSM/UMTS Cell Broadcast identifiers
-  CELL_ID = 0x03,             // GSM/UMTS Cell ID
-  LOCATION_AREA = 0x04,       // Location Area Code (LAC)
-  ROUTING_AREA = 0x05,        // Routing Area Code (RAC)
-  SERVICE_AREA = 0x06,        // Service Area Code (SAC)
-  
-  // CDMA broadcast areas
-  CDMA_CGI = 0x07,            // CDMA Cell Global ID
-  CDMA_SID_NID = 0x08,        // CDMA System ID / Network ID
-  
-  // Additional formats
-  UTRAN_CELL_ID = 0x09,       // UTRAN Cell ID
-  LAI = 0x0a,                 // Location Area Identification
+  ALIAS_NAME = 0x00,    // Alias (geographic name / abbreviation)
+  ELLIPSOID_ARC = 0x01, // Ellipsoid arc
+  POLYGON = 0x02,       // Polygon (series of coordinates)
 }
 
 // Data Coding
@@ -542,6 +502,9 @@ export interface ReplaceSMParams {
   readonly registered_delivery: number;
   readonly sm_default_msg_id: number;
   readonly short_message: string | Buffer;
+  // Optional: use message_payload TLV for content > 255 octets (sm_length is then 0)
+  readonly message_payload?: Buffer;
+  readonly tlvs?: TLV[];
 }
 
 // Submit Multi Parameters (Optional Operation)
@@ -566,6 +529,9 @@ export interface SubmitMultiParams {
   readonly data_coding?: DataCoding;
   readonly sm_default_msg_id?: number;
   readonly short_message: string | Buffer;
+  // Optional: use message_payload TLV for content > 255 octets (sm_length is then 0)
+  readonly message_payload?: Buffer;
+  readonly tlvs?: TLV[];
 }
 
 export interface SubmitMultiResp {
@@ -704,6 +670,7 @@ export interface SMPPConfig {
 
   // Logging
   readonly debug?: boolean;
+  readonly trace_pdu?: boolean; // Log raw PDU hex on the wire (verbose; may include message content)
   readonly logger?: Logger;
 }
 
@@ -804,12 +771,17 @@ export enum TLVTag {
   ALERT_ON_MESSAGE_DELIVERY = 0x130c,
   ITS_REPLY_TYPE = 0x1380,
   ITS_SESSION_INFO = 0x1383,
-  // Broadcast-specific TLVs (SMPP v5 Spec Section 4.8.4)
+  // Broadcast-specific TLVs (SMPP v5 Spec Table 4-60, 0x0600-0x060B)
+  BROADCAST_CHANNEL_INDICATOR = 0x0600,
+  BROADCAST_CONTENT_TYPE = 0x0601,
+  BROADCAST_CONTENT_TYPE_INFO = 0x0602,
+  BROADCAST_MESSAGE_CLASS = 0x0603,
+  BROADCAST_REP_NUM = 0x0604,
+  BROADCAST_FREQUENCY_INTERVAL = 0x0605,
   BROADCAST_AREA_IDENTIFIER = 0x0606,
-  BROADCAST_CONTENT_TYPE = 0x0600,
-  BROADCAST_REP_NUM = 0x0607,
-  BROADCAST_FREQUENCY_INTERVAL = 0x0608,
-  BROADCAST_AREA_SUCCESS = 0x0609,
-  BROADCAST_END_TIME = 0x060a,        // Fixed: was 0x0609 (duplicate)
-  BROADCAST_SERVICE_GROUP = 0x060b,   // Fixed: was 0x060a (wrong)
+  BROADCAST_ERROR_STATUS = 0x0607,
+  BROADCAST_AREA_SUCCESS = 0x0608,
+  BROADCAST_END_TIME = 0x0609,
+  BROADCAST_SERVICE_GROUP = 0x060a,
+  BILLING_IDENTIFICATION = 0x060b,
 }

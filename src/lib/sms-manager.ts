@@ -17,6 +17,64 @@ import type {
 } from "./types.js";
 
 /**
+ * GSM 03.38 default alphabet, used for data_coding 0x00 (MC default alphabet).
+ * The 128-character basic set maps Unicode <-> single GSM octets; ten characters
+ * live in an extension table reached via the ESC (0x1B) prefix. This is the
+ * character mapping only - septet bit-packing happens at the air interface, not
+ * in the SMPP short_message field.
+ */
+const GSM_BASIC =
+  "@£$¥èéùìòÇ\nØø\rÅå" +
+  "Δ_ΦΓΛΩΠΨΣΘΞÆæßÉ" +
+  " !\"#¤%&'()*+,-./0123456789:;<=>?" +
+  "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§" +
+  "¿abcdefghijklmnopqrstuvwxyzäöñüà";
+
+const GSM_EXTENSION: Record<string, number> = {
+  "\f": 0x0a, "^": 0x14, "{": 0x28, "}": 0x29, "\\": 0x2f,
+  "[": 0x3c, "~": 0x3d, "]": 0x3e, "|": 0x40, "€": 0x65,
+};
+
+const GSM_BASIC_REVERSE = new Map<string, number>();
+for (let i = 0; i < GSM_BASIC.length; i++) GSM_BASIC_REVERSE.set(GSM_BASIC[i]!, i);
+const GSM_EXTENSION_REVERSE = new Map<number, string>();
+for (const [ch, code] of Object.entries(GSM_EXTENSION)) GSM_EXTENSION_REVERSE.set(code, ch);
+
+/** Encode a string to GSM 03.38 octets. Unsupported characters become '?'. */
+function encodeGsm0338(text: string): Buffer {
+  const bytes: number[] = [];
+  for (const ch of text) {
+    if (ch === "") { bytes.push(0x3f); continue; } // never emit a bare ESC
+    const basic = GSM_BASIC_REVERSE.get(ch);
+    if (basic !== undefined) { bytes.push(basic); continue; }
+    const ext = GSM_EXTENSION[ch];
+    if (ext !== undefined) { bytes.push(0x1b, ext); continue; }
+    bytes.push(0x3f); // '?' for characters outside the GSM alphabet
+  }
+  return Buffer.from(bytes);
+}
+
+/** Decode GSM 03.38 octets back to a string. */
+function decodeGsm0338(buf: Buffer): string {
+  let out = "";
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i]!;
+    if (b === 0x1b) {
+      const next = buf[i + 1];
+      if (next !== undefined && GSM_EXTENSION_REVERSE.has(next)) {
+        out += GSM_EXTENSION_REVERSE.get(next);
+        i++;
+        continue;
+      }
+      out += " "; // lone ESC -> display as space
+      continue;
+    }
+    if (b < GSM_BASIC.length) out += GSM_BASIC[b];
+  }
+  return out;
+}
+
+/**
  * Simplified SMS parameters
  */
 export interface SMSParams {
@@ -88,7 +146,7 @@ export class SMSManager extends EventEmitter {
    * 
    * @param value - Time value (e.g., 24 for 24 hours)
    * @param unit - Time unit: 'minutes', 'hours', or 'days' (default: 'hours')
-   * @returns Formatted validity period string (17 octets)
+   * @returns Formatted validity period (16-character string "YYMMDDhhmmss000R")
    * 
    * @example
    * // 24 hours from now
@@ -219,16 +277,23 @@ export class SMSManager extends EventEmitter {
   /**
    * Create an absolute validity period (SMPP v5 Spec Section 4.7.29)
    * @param date - Absolute expiry date/time
-   * @param utcOffset - UTC offset in quarter-hours (default: 0 for UTC)
-   * @returns Formatted validity period string (17 octets)
+   * @param utcOffset - UTC offset in quarter-hours, integer in [-48, 48] (default: 0 for UTC)
+   * @returns Formatted validity period (16-character string "YYMMDDhhmmsstnnp")
    * @example
    * SMSManager.createAbsoluteValidityPeriod(new Date('2025-12-31T23:59:00Z'))
    */
   static createAbsoluteValidityPeriod(date: Date, utcOffset = 0): string {
-    // Format: "YYMMDDhhmmsstnnp"
+    // Format: "YYMMDDhhmmsstnnp" (16 chars)
     // YY = year, MM = month, DD = day, hh = hour, mm = minute, ss = second
-    // t = tenths of second, nn = UTC offset in quarter-hours, p = sign (+/-)
-    
+    // t = tenths of second (1 digit), nn = UTC offset in quarter-hours (2 digits),
+    // p = sign (+/-). Validate utcOffset so nn is always exactly 2 digits and the
+    // output stays a fixed 16 characters.
+    if (!Number.isInteger(utcOffset) || Math.abs(utcOffset) > 48) {
+      throw new Error(
+        "utcOffset must be an integer number of quarter-hours in the range [-48, 48]"
+      );
+    }
+
     const year = date.getUTCFullYear() % 100;
     const month = date.getUTCMonth() + 1;
     const day = date.getUTCDate();
@@ -267,16 +332,17 @@ export class SMSManager extends EventEmitter {
     };
 
     this.#logger = config.logger ?? {
-      debug: () => {},
-      info: (msg) => console.log(msg),
-      warn: (msg) => console.warn(msg),
-      error: (msg) => console.error(msg),
+      debug: (msg, meta) => { if (config.debug) console.log(`[DEBUG] ${msg}`, meta ?? ""); },
+      info: (msg, meta) => console.log(`[INFO] ${msg}`, meta ?? ""),
+      warn: (msg, meta) => console.warn(`[WARN] ${msg}`, meta ?? ""),
+      error: (msg, meta) => console.error(`[ERROR] ${msg}`, meta ?? ""),
     };
 
     this.#client = new SMPPClient(config);
     this.#queue = new MessageQueue({
       maxSize: this.#config.queueMaxSize!,
       maxRetries: this.#config.queueMaxRetries!,
+      logger: this.#logger,
     });
 
     this.#rateLimiter = new RateLimiter(
@@ -296,7 +362,17 @@ export class SMSManager extends EventEmitter {
     this.#client.on("disconnect", () => this.emit("disconnect"));
     this.#client.on("bind", (data) => this.emit("bind", data));
     this.#client.on("unbind", () => this.emit("unbind"));
-    this.#client.on("error", (error) => this.emit("error", error));
+    // Re-emit errors, but guard against the EventEmitter crash when no 'error'
+    // listener is attached (emitting 'error' with no listener throws). Log it
+    // either way so a failure is never silently lost.
+    this.#client.on("error", (error) => {
+      this.#logger.error("SMPP client error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (this.listenerCount("error") > 0) {
+        this.emit("error", error);
+      }
+    });
 
     this.#client.on("reconnecting", (data) => {
       this.emit("reconnecting", data);
@@ -486,7 +562,9 @@ export class SMSManager extends EventEmitter {
           willRetry: message.retryCount + 1 < (this.#config.queueMaxRetries ?? 3),
         });
       } else {
-        // Non-retryable error, fail permanently
+        // Non-retryable error, fail permanently. Use markFailed so the caller's
+        // promise REJECTS (markSuccess would resolve it with "" - a fake id -
+        // making a permanent failure look like a successful send).
         this.#logger.error("Message failed permanently - non-retryable error", {
           messageId: message.id,
           error: errorMessage,
@@ -494,8 +572,7 @@ export class SMSManager extends EventEmitter {
           destination: message.params.destination_addr,
         });
 
-        this.#queue.markSuccess(message, ""); // Remove from processing
-        message.reject?.(err);
+        this.#queue.markFailed(message, err);
 
         this.emit("sms_failed", {
           messageId: message.id,
@@ -544,7 +621,7 @@ export class SMSManager extends EventEmitter {
    */
   #parseReceivedSMS(pdu: DeliverSMParams): ReceivedSMS {
     return {
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
       from: pdu.source_addr,
       to: pdu.destination_addr,
       message: this.#decodeMessage(pdu.short_message, pdu.data_coding),
@@ -568,7 +645,10 @@ export class SMSManager extends EventEmitter {
       return {
         messageId: pdu.receipted_message_id,
         status: messageState !== undefined ? this.#mapMessageState(messageState) : "UNKNOWN",
-        ...(networkError ? { error: this.#formatNetworkError(networkError) } : {}),
+        // network_error_code is a 3-octet buffer; ignore an empty/short one.
+        ...(networkError && networkError.length >= 3
+          ? { error: this.#formatNetworkError(networkError) }
+          : {}),
         timestamp: new Date(),
       };
     }
@@ -600,6 +680,7 @@ export class SMSManager extends EventEmitter {
    */
   #mapMessageState(state: number): string {
     const stateMap: Record<number, string> = {
+      0: "SCHEDULED",        // Message is scheduled (SMPP v5.0)
       1: "ENROUTE",          // Message is in transit
       2: "DELIVERED",        // Message delivered to destination
       3: "EXPIRED",          // Message validity period has expired
@@ -633,7 +714,9 @@ export class SMSManager extends EventEmitter {
    */
   #decodeMessage(buffer: Buffer, dataCoding: number): string {
     switch (dataCoding) {
-      case 0x00: // SMSC Default Alphabet
+      case 0x00: // SMSC Default Alphabet (GSM 03.38)
+        return decodeGsm0338(buffer);
+
       case 0x01: // IA5/ASCII (CCITT T.50/ANSI X3.4)
         return buffer.toString("ascii");
         
@@ -696,7 +779,9 @@ export class SMSManager extends EventEmitter {
    */
   #encodeMessage(message: string, dataCoding: number): Buffer {
     switch (dataCoding) {
-      case 0x00: // SMSC Default (GSM 7-bit)
+      case 0x00: // SMSC Default alphabet (GSM 03.38)
+        return encodeGsm0338(message);
+
       case 0x01: // IA5/ASCII
         return Buffer.from(message, "ascii");
         
@@ -739,13 +824,13 @@ export class SMSManager extends EventEmitter {
     const messageBuffer = this.#encodeMessage(params.message, dataCoding);
     const messageLength = messageBuffer.length;
 
-    // SMPP v5 spec: short_message supports 0-254 bytes (255 is reserved)
-    // For messages > 254 bytes, use message_payload TLV instead
-    const useMessagePayload = messageLength > 254;
+    // SMPP v5 spec (Table 4-58): short_message / sm_length holds 1-255 octets;
+    // message_payload must be used for user data larger than 255 octets.
+    const useMessagePayload = messageLength > 255;
 
     if (useMessagePayload) {
       this.#logger.debug(
-        `Message length (${messageLength} bytes) exceeds 254 bytes, using message_payload TLV`,
+        `Message length (${messageLength} bytes) exceeds 255 bytes, using message_payload TLV`,
         {
           messageLength,
           dataCoding: `0x${dataCoding.toString(16).padStart(2, "0")}`,
@@ -768,7 +853,7 @@ export class SMSManager extends EventEmitter {
       registered_delivery: params.requestDeliveryReceipt ? 1 : 0,
       validity_period: params.validityPeriod ?? "",
       
-      // Use short_message for messages <= 254 bytes, empty for longer messages
+      // Use short_message for messages <= 255 bytes, empty for longer messages
       short_message: useMessagePayload ? "" : messageBuffer,
       
       // For long messages, add message_payload TLV
@@ -859,15 +944,15 @@ export class SMSManager extends EventEmitter {
           typicalMaxChars,
           encoding,
           dataCoding: `0x${dataCoding.toString(16).padStart(2, "0")}`,
-          willUseTLV: byteLength > 254,
+          willUseTLV: byteLength > 255,
         }
       );
     }
 
-    // Info log if using message_payload TLV (> 254 bytes)
-    if (byteLength > 254) {
+    // Info log if using message_payload TLV (> 255 bytes)
+    if (byteLength > 255) {
       this.#logger.info(
-        `Message size (${byteLength} bytes) exceeds short_message limit (254 bytes). ` +
+        `Message size (${byteLength} bytes) exceeds short_message limit (255 bytes). ` +
         `Will use message_payload TLV instead.`,
         {
           bytes: byteLength,
@@ -892,27 +977,29 @@ export class SMSManager extends EventEmitter {
 
   /**
    * Validate validity period format
-   * SMPP v5 Spec Section 4.7.29 (validity_period)
-   * 
-   * Supports two formats:
-   * - Absolute Time: "YYMMDDhhmmsstnnp" (17 octets)
-   * - Relative Time: "YYMMDDhhmmss000R" (17 octets)
+   * SMPP v5 Spec Section 4.7.23.4 (validity_period), Tables 4-54 / 4-55
+   *
+   * The time is a 16-character string "YYMMDDhhmmsstnnp" (encoded on the wire as
+   * a 17-octet C-Octet String - the 17th octet is the NULL terminator and is NOT
+   * part of this JS string). Both forms are 16 characters:
+   * - Absolute Time: "YYMMDDhhmmsstnnp" where p is '+' or '-'
+   * - Relative Time: "YYMMDDhhmmss000R" where p is 'R'
    */
   #validateValidityPeriod(validityPeriod: string): void {
     if (validityPeriod.length === 0) {
       return; // Empty is valid (no validity period)
     }
 
-    if (validityPeriod.length !== 17) {
+    if (validityPeriod.length !== 16) {
       this.#logger.warn(
-        `Validity period length should be 17 octets, got ${validityPeriod.length}`,
+        `Validity period should be a 16-character string, got ${validityPeriod.length}`,
         { validityPeriod }
       );
       return;
     }
 
-    // Check format: last character should be 'R' for relative or '+'/'-' for absolute
-    const lastChar = validityPeriod[16];
+    // Last character is the sign: 'R' (relative) or '+'/'-' (absolute).
+    const lastChar = validityPeriod[15];
     if (lastChar !== "R" && lastChar !== "+" && lastChar !== "-") {
       this.#logger.warn(
         `Validity period format invalid. Last character should be 'R' (relative) or '+'/'-' (absolute), got '${lastChar}'`,
@@ -920,11 +1007,11 @@ export class SMSManager extends EventEmitter {
       );
     }
 
-    // Validate that first 16 characters are digits
-    const timeDigits = validityPeriod.slice(0, 16);
-    if (!/^\d{16}$/.test(timeDigits)) {
+    // The first 15 characters (YYMMDDhhmmss + t + nn) must all be digits.
+    const timeDigits = validityPeriod.slice(0, 15);
+    if (!/^\d{15}$/.test(timeDigits)) {
       this.#logger.warn(
-        "Validity period format invalid. First 16 characters should be digits (YYMMDDhhmmsstnnp)",
+        "Validity period format invalid. First 15 characters should be digits (YYMMDDhhmmsstnn)",
         { validityPeriod }
       );
     }
@@ -946,35 +1033,31 @@ export class SMSManager extends EventEmitter {
     // Permanent errors that should NEVER be retried (SMPP v5 spec)
     // These indicate configuration or validation issues that won't resolve on retry
     const permanentErrors = [
-      // Protocol and Configuration Errors (0x00000001-0x0000000F)
-      "ESME_RINVMSGLEN",    // 0x00000001 - Message Length is invalid
-      "ESME_RINVCMDID",     // 0x00000003 - Invalid Command ID
-      "ESME_RINVBNDSTS",    // 0x00000004 - Incorrect BIND Status
-      "ESME_RALYBND",       // 0x00000005 - Already in Bound State
-      "ESME_RINVSRCADR",    // 0x0000000A - Invalid Source Address
-      "ESME_RINVDSTADR",    // 0x0000000B - Invalid Destination Address
-      "ESME_RBINDFAIL",     // 0x0000000D - Bind Failed
-      "ESME_RINVPASWD",     // 0x0000000E - Invalid Password
-      "ESME_RINVSYSID",     // 0x0000000F - Invalid System ID
-      
-      // Address and Parameter Errors (0x00000043-0x00000051)
-      "ESME_RINVESMCLASS",  // 0x00000043 - Invalid esm_class field data
-      "ESME_RSUBMITFAIL",   // 0x00000045 - submit_sm failed (permanent)
-      "ESME_RINVDCS",       // 0x00000046 - Invalid Data Coding Scheme
-      "ESME_RINVSRCTON",    // 0x00000048 - Invalid Source address TON
-      "ESME_RINVSRCNPI",    // 0x00000049 - Invalid Source address NPI
-      "ESME_RINVDSTTON",    // 0x00000050 - Invalid Destination address TON
-      "ESME_RINVDSTNPI",    // 0x00000051 - Invalid Destination address NPI
-      
-      // Service Type Errors (SMPP v5.0 specific)
-      "ESME_RSERTYPDENIED", // Service type denied
-      "ESME_RSERTYPUNAUTH", // 0x00000101 - Service type unauthorized
-      "ESME_RSERTYPUNAVAIL",// Service type unavailable
-      
-      // Access and Permission Errors (0x00000100+)
-      "ESME_RPROHIBITED",   // 0x00000100 - Operation not permitted
-      "ESME_RPROHIBITED_DEST", // 0x00000102 - Prohibited destination address
-      "ESME_RSUBMITFAIL_BLOCKED", // 0x00000104 - Submit failed, blocked destination
+      // Protocol / bind / validation errors (won't resolve on retry)
+      "ESME_RINVMSGLEN",    // 0x01 - Message Length is invalid
+      "ESME_RINVCMDID",     // 0x03 - Invalid Command ID
+      "ESME_RINVBNDSTS",    // 0x04 - Incorrect BIND Status
+      "ESME_RALYBND",       // 0x05 - Already in Bound State
+      "ESME_RINVSRCADR",    // 0x0A - Invalid Source Address
+      "ESME_RINVDSTADR",    // 0x0B - Invalid Destination Address
+      "ESME_RINVMSGID",     // 0x0C - Message ID is invalid
+      "ESME_RBINDFAIL",     // 0x0D - Bind Failed
+      "ESME_RINVPASWD",     // 0x0E - Invalid Password
+      "ESME_RINVSYSID",     // 0x0F - Invalid System ID
+
+      // Address / field validation errors
+      "ESME_RINVESMCLASS",  // 0x43 - Invalid esm_class field data
+      "ESME_RSUBMITFAIL",   // 0x45 - submit_sm/data_sm/submit_multi failed (generic)
+      "ESME_RINVSRCTON",    // 0x48 - Invalid Source address TON
+      "ESME_RINVSRCNPI",    // 0x49 - Invalid Source address NPI
+      "ESME_RINVDSTTON",    // 0x50 - Invalid Destination address TON
+      "ESME_RINVDSTNPI",    // 0x51 - Invalid Destination address NPI
+      "ESME_RINVDCS",       // 0x104 - Invalid Data Coding Scheme
+
+      // service_type / permission denials (permanent)
+      "ESME_RSERTYPUNAUTH", // 0x100 - not authorised to use service_type
+      "ESME_RPROHIBITED",   // 0x101 - operation prohibited for this ESME
+      "ESME_RSERTYPDENIED", // 0x103 - service_type denied
     ];
 
     // Check for permanent errors first
@@ -997,9 +1080,10 @@ export class SMSManager extends EventEmitter {
       "ESME_RTHROTTLED",    // 0x00000058 - Throttling error (ESME exceeded message limits)
       "ESME_RMSGQFUL",      // 0x00000014 - Message Queue Full
       
-      // System errors (temporary)
+      // System / transient service errors (temporary)
       "ESME_RSYSERR",       // 0x00000008 - System Error (MC unavailable)
-      
+      "ESME_RSERTYPUNAVAIL",// 0x00000102 - service_type unavailable (MC outage)
+
       // Connection errors (temporary network issues)
       "Connection closed",
       "not connected",

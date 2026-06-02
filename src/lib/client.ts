@@ -29,7 +29,7 @@ import type {
   Logger,
 } from "./types.js";
 import { CommandId, CommandStatus, SessionState as SS } from "./types.js";
-import { PDUEncoder, PDUDecoder } from "./pdu.js";
+import { PDUEncoder, PDUDecoder, InvalidPDUError } from "./pdu.js";
 
 /**
  * Default logger implementation
@@ -98,6 +98,9 @@ export class SMPPClient extends EventEmitter {
 
   // Connection state
   #isConnecting = false;
+  #lastBindType: BindType = "transceiver";
+  #scInterfaceVersion: number | null = null;
+  #unbindTimer: NodeJS.Timeout | null = null;
 
   constructor(config: SMPPConfig) {
     super();
@@ -123,6 +126,7 @@ export class SMPPClient extends EventEmitter {
       use_tls: config.use_tls ?? false,
       tls_options: config.tls_options ?? {},
       debug: config.debug ?? false,
+      trace_pdu: config.trace_pdu ?? false,
       logger: config.logger ?? new ConsoleLogger(config.debug ?? false),
     };
 
@@ -163,6 +167,13 @@ export class SMPPClient extends EventEmitter {
 
     this.#isIntentionalClose = false;
     this.#isConnecting = true;
+    this.#lastBindType = bindType;
+
+    // Begin each session with a fresh sequence number (SMPP v5 Spec 2.7.1) and
+    // discard any bytes left over from a previous (dropped) connection so a
+    // partial PDU cannot corrupt the new session's framing.
+    this.#sequenceNumber = 1;
+    this.#receiveBuffer = Buffer.alloc(0);
 
     this.#logger.info("Initiating connection to SMPP server", {
       host: this.#config.host,
@@ -233,11 +244,37 @@ export class SMPPClient extends EventEmitter {
       timeout: this.#config.socket_timeout,
     });
 
-    this.#socket = new net.Socket();
-    this.#socket.setTimeout(this.#config.socket_timeout);
-    this.#socket.setKeepAlive(true, 60000); // TCP keep-alive
+    const socket = new net.Socket();
+    this.#socket = socket;
+    socket.setKeepAlive(true, 60000); // TCP keep-alive
+
+    let settled = false;
+
+    // Explicit connect deadline. socket.setTimeout only arms an INACTIVITY timer
+    // that does not fire during the TCP handshake, so we guard the connect phase
+    // ourselves and tear the socket down if it stalls (e.g. a black-holed host).
+    const connectTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      this.#logger.error("TCP socket connection timeout", {
+        timeout: this.#config.socket_timeout,
+        host: this.#config.host,
+        port: this.#config.port,
+      });
+      cleanup();
+      socket.destroy();
+      reject(new Error(`Connection timeout after ${this.#config.socket_timeout}ms`));
+    }, this.#config.socket_timeout);
+
+    const cleanup = () => {
+      clearTimeout(connectTimer);
+      socket.removeListener("error", onError);
+      socket.removeListener("connect", onConnect);
+    };
 
     const onError = (error: Error) => {
+      if (settled) return;
+      settled = true;
       const nodeError = error as NodeJS.ErrnoException;
       this.#logger.error("TCP socket connection error", {
         error: error.message,
@@ -247,49 +284,44 @@ export class SMPPClient extends EventEmitter {
         port: this.#config.port,
       });
       cleanup();
+      socket.destroy();
       reject(error);
     };
 
     const onConnect = () => {
+      if (settled) return;
+      settled = true;
       this.#logger.info("TCP socket connected successfully", {
         host: this.#config.host,
         port: this.#config.port,
-        localAddress: this.#socket?.localAddress,
-        localPort: this.#socket?.localPort,
+        localAddress: socket.localAddress,
+        localPort: socket.localPort,
       });
       this.#state = SS.OPEN;
       this.#lastActivity = Date.now();
       cleanup();
+      // Attach the persistent handlers ONLY after a successful connect. During
+      // the connect phase a socket error is reported solely via reject(); this
+      // avoids the persistent #handleError re-emitting 'error' on the client
+      // (which would crash the process if the caller has no 'error' listener yet).
+      this.#attachSocketHandlers(socket);
       resolve();
     };
 
-    const onTimeout = () => {
-      this.#logger.error("TCP socket connection timeout", {
-        timeout: this.#config.socket_timeout,
-        host: this.#config.host,
-        port: this.#config.port,
-      });
-      cleanup();
-      reject(new Error(`Connection timeout after ${this.#config.socket_timeout}ms`));
-    };
-
-    const cleanup = () => {
-      this.#socket?.removeListener("error", onError);
-      this.#socket?.removeListener("connect", onConnect);
-      this.#socket?.removeListener("timeout", onTimeout);
-    };
-
-    this.#socket.once("error", onError);
-    this.#socket.once("connect", onConnect);
-    this.#socket.once("timeout", onTimeout);
-
-    // Setup persistent event handlers
-    this.#socket.on("data", this.#handleData.bind(this));
-    this.#socket.on("close", this.#handleClose.bind(this));
-    this.#socket.on("error", this.#handleError.bind(this));
+    socket.once("error", onError);
+    socket.once("connect", onConnect);
 
     this.#logger.debug("Connecting TCP socket...");
-    this.#socket.connect(this.#config.port, this.#config.host);
+    socket.connect(this.#config.port, this.#config.host);
+  }
+
+  /**
+   * Attach the persistent data/close/error handlers to a connected socket.
+   */
+  #attachSocketHandlers(socket: net.Socket | tls.TLSSocket): void {
+    socket.on("data", this.#handleData.bind(this));
+    socket.on("close", this.#handleClose.bind(this));
+    socket.on("error", this.#handleError.bind(this));
   }
 
   /**
@@ -298,72 +330,85 @@ export class SMPPClient extends EventEmitter {
   #createTLSSocket(resolve: () => void, reject: (error: Error) => void): void {
     const tlsOptions = this.#prepareTLSOptions();
 
-    this.#socket = tls.connect(
+    const socket = tls.connect(
       this.#config.port,
       this.#config.host,
       tlsOptions
     );
-    this.#socket.setTimeout(this.#config.socket_timeout);
+    this.#socket = socket;
+
+    let settled = false;
+
+    // Explicit connect/handshake deadline (see #createTCPSocket). tls.connect's
+    // setTimeout does not guarantee firing before 'secureConnect'.
+    const connectTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      this.#logger.error("TLS connection timeout", {
+        timeout: this.#config.socket_timeout,
+        host: this.#config.host,
+        port: this.#config.port,
+      });
+      cleanup();
+      socket.destroy();
+      reject(new Error(`TLS connection timeout after ${this.#config.socket_timeout}ms`));
+    }, this.#config.socket_timeout);
+
+    const cleanup = () => {
+      clearTimeout(connectTimer);
+      socket.removeListener("error", onError);
+      socket.removeListener("secureConnect", onSecureConnect);
+    };
 
     const onError = (error: Error) => {
+      if (settled) return;
+      settled = true;
       this.#logger.error("TLS socket error", error);
       cleanup();
+      socket.destroy();
       reject(error);
     };
 
     const onSecureConnect = () => {
-      const tlsSocket = this.#socket as tls.TLSSocket;
+      if (settled) return;
 
       // Log TLS information
       if (this.#config.debug) {
         this.#logger.debug("TLS connection established", {
-          protocol: tlsSocket.getProtocol(),
-          cipher: tlsSocket.getCipher()?.name,
-          authorized: tlsSocket.authorized,
+          protocol: socket.getProtocol(),
+          cipher: socket.getCipher()?.name,
+          authorized: socket.authorized,
         });
       }
 
       // Check if certificate is authorized
       if (
-        !tlsSocket.authorized &&
+        !socket.authorized &&
         this.#config.tls_options?.rejectUnauthorized !== false
       ) {
-        const authError = tlsSocket.authorizationError;
+        settled = true;
+        const authError = socket.authorizationError;
         this.#logger.error("TLS certificate not authorized", authError);
         cleanup();
+        socket.destroy();
         reject(
           new Error(`TLS certificate error: ${authError?.message || "Unknown"}`)
         );
         return;
       }
 
+      settled = true;
       this.#logger.info("TLS socket connected securely");
       this.#state = SS.OPEN;
       this.#lastActivity = Date.now();
       cleanup();
+      // Attach persistent handlers only after the handshake succeeds (see #createTCPSocket).
+      this.#attachSocketHandlers(socket);
       resolve();
     };
 
-    const onTimeout = () => {
-      this.#logger.error("TLS connection timeout");
-      cleanup();
-      reject(new Error("TLS connection timeout"));
-    };
-
-    const cleanup = () => {
-      this.#socket?.removeListener("error", onError);
-      this.#socket?.removeListener("secureConnect", onSecureConnect);
-      this.#socket?.removeListener("timeout", onTimeout);
-    };
-
-    this.#socket.once("error", onError);
-    this.#socket.once("secureConnect", onSecureConnect);
-    this.#socket.once("timeout", onTimeout);
-
-    // Setup persistent event handlers
-    this.#socket.on("data", this.#handleData.bind(this));
-    this.#socket.on("close", this.#handleClose.bind(this));
-    this.#socket.on("error", this.#handleError.bind(this));
+    socket.once("error", onError);
+    socket.once("secureConnect", onSecureConnect);
   }
 
   /**
@@ -489,7 +534,11 @@ export class SMPPClient extends EventEmitter {
     }
 
     const bindResult = PDUDecoder.decodeBindResp(response);
-    
+
+    // Record the MC's advertised SMPP version (sc_interface_version TLV). If
+    // absent, the MC does not support TLVs (SMPP v5 Spec 4.1.1.2).
+    this.#scInterfaceVersion = bindResult.sc_interface_version ?? null;
+
     this.#state =
       bindType === "transmitter"
         ? SS.BOUND_TX
@@ -502,6 +551,7 @@ export class SMPPClient extends EventEmitter {
       bindType,
       systemId: bindResult.system_id,
       serverSystemId: bindResult.system_id,
+      scInterfaceVersion: this.#scInterfaceVersion,
       state: this.#state,
     });
 
@@ -962,7 +1012,32 @@ export class SMPPClient extends EventEmitter {
     // Process all complete PDUs in buffer
     let pduCount = 0;
     while (this.#receiveBuffer.length >= 16) {
-      const pdu = PDUDecoder.decodePDUHeader(this.#receiveBuffer);
+      let pdu: PDU | null;
+      try {
+        pdu = PDUDecoder.decodePDUHeader(this.#receiveBuffer);
+      } catch (error) {
+        if (!(error instanceof InvalidPDUError)) throw error;
+        // Structurally invalid command_length (too short or too large). Per spec
+        // respond generic_nack/ESME_RINVCMDLEN and tear the connection down -
+        // continuing would risk an infinite loop or unbounded buffering.
+        const seq = this.#receiveBuffer.length >= 16 ? this.#receiveBuffer.readUInt32BE(12) : 0;
+        this.#logger.error("Invalid PDU framing - sending GENERIC_NACK and closing", {
+          error: (error as Error).message,
+          bufferSize: this.#receiveBuffer.length,
+        });
+        try {
+          this.#sendPDU(
+            PDUEncoder.encodeGenericNack(seq, CommandStatus.ESME_RINVCMDLEN)
+          );
+        } catch (nackErr) {
+          this.#logger.debug("Could not send GENERIC_NACK (socket unwritable)", {
+            error: (nackErr as Error).message,
+          });
+        }
+        this.#receiveBuffer = Buffer.alloc(0);
+        this.#handleConnectionFailure(error as Error);
+        return;
+      }
 
       if (!pdu) {
         // Incomplete PDU - need more data
@@ -984,7 +1059,13 @@ export class SMPPClient extends EventEmitter {
         break;
       }
 
-      // Remove processed PDU from buffer
+      // Remove processed PDU from buffer (command_length is guaranteed >= 16 here)
+      if (this.#config.trace_pdu) {
+        this.#logger.debug("PDU RX (wire)", {
+          bytes: pdu.command_length,
+          hex: this.#receiveBuffer.slice(0, pdu.command_length).toString("hex"),
+        });
+      }
       this.#receiveBuffer = this.#receiveBuffer.slice(pdu.command_length);
       pduCount++;
 
@@ -1008,37 +1089,61 @@ export class SMPPClient extends EventEmitter {
    * Handle parsed PDU
    */
   #handlePDU(pdu: PDU): void {
-    const pending = this.#pendingRequests.get(pdu.sequence_number);
+    // A PDU is a response iff bit 31 of command_id is set (generic_nack=0x80000000
+    // included). Only responses are correlated to a pending request by sequence
+    // number; MC-originated REQUESTS (bit 31 clear) are always dispatched to a
+    // handler, because the ESME and MC sequence-number spaces are independent and
+    // their values may collide (SMPP v5 Spec 2.6 / 4.7.5).
+    const isResponse = (pdu.command_id & 0x80000000) !== 0;
 
-    if (pending) {
-      clearTimeout(pending.timeout);
-      this.#pendingRequests.delete(pdu.sequence_number);
-      
-      // Handle GENERIC_NACK specially - reject with error
+    if (isResponse) {
+      const pending = this.#pendingRequests.get(pdu.sequence_number);
+
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.#pendingRequests.delete(pdu.sequence_number);
+
+        // Handle GENERIC_NACK specially - reject with error
+        if (pdu.command_id === CommandId.GENERIC_NACK) {
+          const statusName = PDUDecoder.getStatusName(pdu.command_status);
+          const statusCode = `0x${pdu.command_status.toString(16).toUpperCase().padStart(8, '0')}`;
+
+          this.#logger.error("Received GENERIC_NACK from SMSC", {
+            sequence: pdu.sequence_number,
+            command: pending.command_name,
+            status: statusName,
+            statusCode,
+          });
+
+          pending.reject(new Error(
+            `SMSC sent GENERIC_NACK for ${pending.command_name}: ${statusName} (${statusCode})`
+          ));
+        } else {
+          pending.resolve(pdu);
+        }
+        return;
+      }
+
+      // No matching request. An unsolicited generic_nack is surfaced as an event;
+      // any other unmatched response is logged and dropped.
       if (pdu.command_id === CommandId.GENERIC_NACK) {
-        const statusName = PDUDecoder.getStatusName(pdu.command_status);
-        const statusCode = `0x${pdu.command_status.toString(16).toUpperCase().padStart(8, '0')}`;
-        
-        this.#logger.error("Received GENERIC_NACK from SMSC", {
-          sequence: pdu.sequence_number,
-          command: pending.command_name,
-          status: statusName,
-          statusCode,
-        });
-        
-        pending.reject(new Error(
-          `SMSC sent GENERIC_NACK for ${pending.command_name}: ${statusName} (${statusCode})`
-        ));
+        this.#handleGenericNack(pdu);
       } else {
-        pending.resolve(pdu);
+        this.#logger.warn("Unsolicited response with no matching request", {
+          command: PDUDecoder.getCommandName(pdu.command_id),
+          sequence: pdu.sequence_number,
+        });
       }
       return;
     }
 
-    // Handle async operations
+    // MC-originated requests
     switch (pdu.command_id) {
       case CommandId.DELIVER_SM:
         this.#handleDeliverSM(pdu);
+        break;
+      case CommandId.DATA_SM:
+        this.#handleDataSM(pdu);
         break;
       case CommandId.ALERT_NOTIFICATION:
         this.#handleAlertNotification(pdu);
@@ -1052,16 +1157,73 @@ export class SMPPClient extends EventEmitter {
       case CommandId.UNBIND:
         this.#handleUnbind(pdu);
         break;
-      case CommandId.GENERIC_NACK:
-        // GENERIC_NACK without matching request - log and emit event
-        this.#handleGenericNack(pdu);
-        break;
       default:
-        this.#logger.warn("Unhandled PDU", {
-          command: PDUDecoder.getCommandName(pdu.command_id),
-          sequence: pdu.sequence_number,
-        });
+        this.#handleUnknownPDU(pdu);
     }
+  }
+
+  /**
+   * Handle an unrecognised inbound request PDU. Per SMPP v5 Spec 3.2 the peer
+   * must be answered with a generic_nack/ESME_RINVCMDID.
+   */
+  #handleUnknownPDU(pdu: PDU): void {
+    this.#logger.warn("Unknown PDU - sending GENERIC_NACK (ESME_RINVCMDID)", {
+      command: PDUDecoder.getCommandName(pdu.command_id),
+      sequence: pdu.sequence_number,
+    });
+    try {
+      this.#sendPDU(
+        PDUEncoder.encodeGenericNack(pdu.sequence_number, CommandStatus.ESME_RINVCMDID)
+      );
+    } catch (error) {
+      this.#logger.error("Failed to send GENERIC_NACK", {
+        error: (error as Error).message,
+      });
+    }
+  }
+
+  /**
+   * Handle DATA_SM PDU (MC-initiated delivery - SMPP v5 Spec 4.7.1)
+   * data_sm is symmetric; the ESME must answer with data_sm_resp.
+   */
+  #handleDataSM(pdu: PDU): void {
+    const data = PDUDecoder.decodeDataSM(pdu);
+
+    if (!data) {
+      this.#logger.error("Failed to decode DATA_SM PDU - invalid format", {
+        sequence: pdu.sequence_number,
+        bodyLength: pdu.body?.length,
+      });
+      this.#sendPDU(
+        PDUEncoder.encodeDataSMResp(
+          pdu.sequence_number,
+          "",
+          CommandStatus.ESME_RINVMSGLEN
+        )
+      );
+      return;
+    }
+
+    const esmClass = data.esm_class ?? 0;
+    const isDeliveryReceipt = (esmClass & 0x04) !== 0;
+
+    this.#logger.debug(
+      isDeliveryReceipt ? "Received delivery receipt (data_sm)" : "Received message (data_sm)",
+      {
+        sequence: pdu.sequence_number,
+        from: data.source_addr,
+        to: data.destination_addr,
+        esmClass: `0x${esmClass.toString(16).padStart(2, '0')}`,
+        dataCoding: data.data_coding,
+        isDeliveryReceipt,
+      }
+    );
+
+    // Emit event for the application to handle
+    this.#safeEmit("data_sm", data);
+
+    // Acknowledge per spec (data_sm_resp)
+    this.#sendPDU(PDUEncoder.encodeDataSMResp(pdu.sequence_number));
   }
 
   /**
@@ -1101,7 +1263,7 @@ export class SMPPClient extends EventEmitter {
     );
 
     // Emit event for application to handle
-    this.emit("deliver_sm", delivery);
+    this.#safeEmit("deliver_sm", delivery);
 
     // Send success response (SMPP spec requires DELIVER_SM_RESP)
     this.#sendPDU(PDUEncoder.encodeDeliverSMResp(pdu.sequence_number));
@@ -1132,7 +1294,7 @@ export class SMPPClient extends EventEmitter {
     });
 
     // Emit event for application to handle
-    this.emit("alert_notification", alert);
+    this.#safeEmit("alert_notification", alert);
   }
 
   /**
@@ -1156,7 +1318,7 @@ export class SMPPClient extends EventEmitter {
 
     // Emit event for application to handle
     // Application should respond by initiating bind_receiver to the MC
-    this.emit("outbind", outbind);
+    this.#safeEmit("outbind", outbind);
   }
 
   /**
@@ -1197,7 +1359,7 @@ export class SMPPClient extends EventEmitter {
     });
 
     // Emit event for application-level handling
-    this.emit("generic_nack", {
+    this.#safeEmit("generic_nack", {
       sequence: pdu.sequence_number,
       status: pdu.command_status,
       statusName,
@@ -1211,9 +1373,16 @@ export class SMPPClient extends EventEmitter {
     this.#logger.info("Received UNBIND from server");
     this.#sendPDU(PDUEncoder.encodeUnbindResp(pdu.sequence_number));
     this.#state = SS.UNBOUND;
-    this.emit("unbind");
+    this.#safeEmit("unbind");
 
-    setTimeout(() => this.#closeSocket(), 1000);
+    // Give the unbind_resp a moment to flush, then close. Track the timer so it
+    // can be cancelled (it is cleared in #closeSocket) - otherwise a close that
+    // races ahead would leave a dangling timer firing on a new socket.
+    if (this.#unbindTimer) clearTimeout(this.#unbindTimer);
+    this.#unbindTimer = setTimeout(() => {
+      this.#unbindTimer = null;
+      this.#closeSocket();
+    }, 1000);
   }
 
   /**
@@ -1231,7 +1400,13 @@ export class SMPPClient extends EventEmitter {
     });
 
     this.#stopKeepAlive();
+    if (this.#unbindTimer) {
+      clearTimeout(this.#unbindTimer);
+      this.#unbindTimer = null;
+    }
     this.#socket = null;
+    // Discard any buffered partial PDU from the dropped connection.
+    this.#receiveBuffer = Buffer.alloc(0);
 
     const wasBound =
       this.#state === SS.BOUND_TX ||
@@ -1248,7 +1423,7 @@ export class SMPPClient extends EventEmitter {
     }
 
     if (wasBound) {
-      this.emit("close", { had_error: hadError });
+      this.#safeEmit("close", { had_error: hadError });
     }
 
     // Auto-reconnect if enabled and not intentional disconnect
@@ -1280,7 +1455,30 @@ export class SMPPClient extends EventEmitter {
       reconnectWillAttempt: this.#config.auto_reconnect && !this.#isIntentionalClose,
     });
 
-    this.emit("error", error);
+    // Only emit 'error' when a listener exists. EventEmitter throws an uncaught
+    // exception (crashing the process) if 'error' is emitted with no listener;
+    // the socket 'close' handler already drives reconnection independently.
+    if (this.listenerCount("error") > 0) {
+      this.emit("error", error);
+    }
+  }
+
+  /**
+   * Emit an application-facing event without letting a throwing listener break
+   * PDU processing or crash the process. A listener exception is caught and
+   * logged rather than propagating back into the socket 'data' handler.
+   */
+  #safeEmit(event: string, ...args: unknown[]): void {
+    try {
+      this.emit(event, ...args);
+    } catch (error) {
+      const err = error as Error;
+      this.#logger.error(`Listener for '${event}' threw an exception`, {
+        event,
+        error: err?.message,
+        stack: this.#config.debug ? err?.stack : undefined,
+      });
+    }
   }
 
   /**
@@ -1313,7 +1511,7 @@ export class SMPPClient extends EventEmitter {
         attempts: this.#reconnectAttempts,
         maxAttempts: this.#config.max_reconnect_attempts,
       });
-      this.emit("reconnect_failed", {
+      this.#safeEmit("reconnect_failed", {
         attempts: this.#reconnectAttempts,
         lastError: "Max attempts exceeded",
       });
@@ -1362,26 +1560,28 @@ export class SMPPClient extends EventEmitter {
       }
     );
 
-    this.emit("reconnecting", {
+    this.#safeEmit("reconnecting", {
       attempt: this.#reconnectAttempts,
       delay: this.#currentReconnectDelay,
     });
 
+    // Capture the attempt count before connect() succeeds and resets it to 0.
+    const attemptNumber = this.#reconnectAttempts;
+
     try {
-      // Try to connect as transceiver
-      await this.connect("transceiver");
+      // Re-establish using the SAME bind type the session originally used,
+      // not a hard-coded transceiver bind.
+      await this.connect(this.#lastBindType);
 
-      // Reset reconnection state on success
-      this.#reconnectAttempts = 0;
-      this.#currentReconnectDelay = this.#config.reconnect_delay;
-
+      // connect() already reset #reconnectAttempts / #currentReconnectDelay on success.
       this.#logger.info("Successfully reconnected to SMPP server", {
-        attempt: this.#reconnectAttempts,
+        attempt: attemptNumber,
+        bindType: this.#lastBindType,
         state: this.#state,
       });
 
-      this.emit("reconnected", {
-        attemptsTaken: this.#reconnectAttempts,
+      this.#safeEmit("reconnected", {
+        attemptsTaken: attemptNumber,
       });
     } catch (error) {
       const err = error as Error;
@@ -1421,6 +1621,16 @@ export class SMPPClient extends EventEmitter {
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
 
+      // Wrap resolve to emit an RTT trace line for every matched response.
+      const tracedResolve = (responsePdu: PDU) => {
+        this.#logger.debug(`${commandName}_RESP received`, {
+          sequence: sequenceNumber,
+          status: PDUDecoder.getStatusName(responsePdu.command_status),
+          rttMs: Date.now() - startTime,
+        });
+        resolve(responsePdu);
+      };
+
       const timer = setTimeout(() => {
         const elapsed = Date.now() - startTime;
         this.#pendingRequests.delete(sequenceNumber);
@@ -1439,7 +1649,7 @@ export class SMPPClient extends EventEmitter {
       }, timeout);
 
       this.#pendingRequests.set(sequenceNumber, {
-        resolve,
+        resolve: tracedResolve,
         reject,
         timeout: timer,
         command_name: commandName,
@@ -1466,6 +1676,13 @@ export class SMPPClient extends EventEmitter {
   #sendPDU(pdu: Buffer): void {
     if (!this.#socket?.writable) {
       throw new Error("Socket not connected");
+    }
+
+    if (this.#config.trace_pdu) {
+      this.#logger.debug("PDU TX (wire)", {
+        bytes: pdu.length,
+        hex: pdu.toString("hex"),
+      });
     }
 
     this.#socket.write(pdu);
@@ -1500,8 +1717,14 @@ export class SMPPClient extends EventEmitter {
    * Close socket
    */
   #closeSocket(): void {
+    if (this.#unbindTimer) {
+      clearTimeout(this.#unbindTimer);
+      this.#unbindTimer = null;
+    }
     this.#socket?.destroy();
     this.#socket = null;
+    // Drop any buffered partial PDU so it cannot bleed into the next session.
+    this.#receiveBuffer = Buffer.alloc(0);
   }
 
   /**
@@ -1525,6 +1748,14 @@ export class SMPPClient extends EventEmitter {
    */
   getState(): SessionState {
     return this.#state;
+  }
+
+  /**
+   * SMPP version advertised by the MC in the bind response (sc_interface_version
+   * TLV), or null if the MC did not include it (implying no TLV support).
+   */
+  getInterfaceVersion(): number | null {
+    return this.#scInterfaceVersion;
   }
 
   /**

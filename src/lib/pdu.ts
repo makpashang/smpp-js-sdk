@@ -34,6 +34,44 @@ import {
   TLVTag,
 } from './types.js';
 
+/**
+ * The SMPP header is a mandatory 16-octet prefix on every PDU
+ * (SMPP v5 Spec Section 3.2). Any command_length below this is invalid.
+ */
+export const SMPP_HEADER_LENGTH = 16;
+
+/**
+ * Upper bound on a single PDU's command_length. A message_payload TLV is at
+ * most 65535 octets, so legitimate PDUs are well under this; the cap exists to
+ * reject a malicious/garbled command_length before it can drive unbounded
+ * buffering (SMPP v5 Spec: respond generic_nack/ESME_RINVCMDLEN). 1 MiB leaves
+ * generous room for vendor extensions.
+ */
+export const MAX_PDU_LENGTH = 1024 * 1024;
+
+/**
+ * Maximum sizes (in octets, including the NULL terminator) of the common
+ * C-Octet String fields, per the SMPP v5 PDU definitions. Used to bound the
+ * encoded fields so an over-long input cannot produce a malformed PDU.
+ */
+export const COctetMax = {
+  system_id: 16,
+  password: 9,
+  system_type: 13,
+  address: 21, // source_addr / destination_addr / esme_addr
+  service_type: 6,
+  message_id: 65,
+  time: 17, // schedule_delivery_time / validity_period (16 chars + NULL)
+} as const;
+
+/** Thrown by the decoder when a PDU header is structurally invalid. */
+export class InvalidPDUError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidPDUError';
+  }
+}
+
 export class PDUEncoder {
   /**
    * Encode a C-string (null-terminated string)
@@ -100,13 +138,13 @@ export class PDUEncoder {
     const header = this.createHeader(CommandId.BIND_TRANSMITTER, sequence_number);
     
     const body = Buffer.concat([
-      this.encodeCString(params.system_id),
-      this.encodeCString(params.password),
-      this.encodeCString(params.system_type || ''),
-      Buffer.from([params.interface_version || 0x50]), // 0x50 = SMPP v5.0
-      Buffer.from([params.addr_ton || TON.UNKNOWN]),
-      Buffer.from([params.addr_npi || NPI.UNKNOWN]),
-      this.encodeCString(params.address_range || ''),
+      this.encodeCString(params.system_id, COctetMax.system_id),
+      this.encodeCString(params.password, COctetMax.password),
+      this.encodeCString(params.system_type ?? '', COctetMax.system_type),
+      Buffer.from([params.interface_version ?? 0x50]), // 0x50 = SMPP v5.0
+      Buffer.from([params.addr_ton ?? TON.UNKNOWN]),
+      Buffer.from([params.addr_npi ?? NPI.UNKNOWN]),
+      this.encodeCString(params.address_range ?? '', COctetMax.address),
     ]);
 
     return this.finalizePDU(header, body);
@@ -117,15 +155,15 @@ export class PDUEncoder {
    */
   static encodeBindReceiver(params: BindParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.BIND_RECEIVER, sequence_number);
-    
+
     const body = Buffer.concat([
-      this.encodeCString(params.system_id),
-      this.encodeCString(params.password),
-      this.encodeCString(params.system_type || ''),
-      Buffer.from([params.interface_version || 0x50]),
-      Buffer.from([params.addr_ton || TON.UNKNOWN]),
-      Buffer.from([params.addr_npi || NPI.UNKNOWN]),
-      this.encodeCString(params.address_range || ''),
+      this.encodeCString(params.system_id, COctetMax.system_id),
+      this.encodeCString(params.password, COctetMax.password),
+      this.encodeCString(params.system_type ?? '', COctetMax.system_type),
+      Buffer.from([params.interface_version ?? 0x50]), // 0x50 = SMPP v5.0
+      Buffer.from([params.addr_ton ?? TON.UNKNOWN]),
+      Buffer.from([params.addr_npi ?? NPI.UNKNOWN]),
+      this.encodeCString(params.address_range ?? '', COctetMax.address),
     ]);
 
     return this.finalizePDU(header, body);
@@ -136,15 +174,15 @@ export class PDUEncoder {
    */
   static encodeBindTransceiver(params: BindParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.BIND_TRANSCEIVER, sequence_number);
-    
+
     const body = Buffer.concat([
-      this.encodeCString(params.system_id),
-      this.encodeCString(params.password),
-      this.encodeCString(params.system_type || ''),
-      Buffer.from([params.interface_version || 0x50]),
-      Buffer.from([params.addr_ton || TON.UNKNOWN]),
-      Buffer.from([params.addr_npi || NPI.UNKNOWN]),
-      this.encodeCString(params.address_range || ''),
+      this.encodeCString(params.system_id, COctetMax.system_id),
+      this.encodeCString(params.password, COctetMax.password),
+      this.encodeCString(params.system_type ?? '', COctetMax.system_type),
+      Buffer.from([params.interface_version ?? 0x50]), // 0x50 = SMPP v5.0
+      Buffer.from([params.addr_ton ?? TON.UNKNOWN]),
+      Buffer.from([params.addr_npi ?? NPI.UNKNOWN]),
+      this.encodeCString(params.address_range ?? '', COctetMax.address),
     ]);
 
     return this.finalizePDU(header, body);
@@ -247,24 +285,25 @@ export class PDUEncoder {
       tlvs.push({ tag: TLVTag.PAYLOAD_TYPE, value: Buffer.from([params.payload_type]) });
     }
     
-    // Encode mandatory fields
+    // Encode mandatory fields. Use ?? (not ||) so an explicit 0 (e.g.
+    // TON.UNKNOWN / NPI.UNKNOWN) is preserved rather than replaced by a default.
     const body = Buffer.concat([
-      this.encodeCString(params.service_type || ''),
-      Buffer.from([params.source_addr_ton || TON.UNKNOWN]),
-      Buffer.from([params.source_addr_npi || NPI.UNKNOWN]),
-      this.encodeCString(params.source_addr),
-      Buffer.from([params.dest_addr_ton || TON.INTERNATIONAL]),
-      Buffer.from([params.dest_addr_npi || NPI.ISDN]),
-      this.encodeCString(params.destination_addr),
-      Buffer.from([params.esm_class || ESMClass.MODE_DEFAULT]),
-      Buffer.from([params.protocol_id || 0]),
-      Buffer.from([params.priority_flag || 0]),
-      this.encodeCString(params.schedule_delivery_time || ''),
-      this.encodeCString(params.validity_period || ''),
-      Buffer.from([params.registered_delivery || 0]),
-      Buffer.from([params.replace_if_present_flag || 0]),
-      Buffer.from([params.data_coding || DataCoding.SMSC_DEFAULT]),
-      Buffer.from([params.sm_default_msg_id || 0]),
+      this.encodeCString(params.service_type ?? '', COctetMax.service_type),
+      Buffer.from([params.source_addr_ton ?? TON.UNKNOWN]),
+      Buffer.from([params.source_addr_npi ?? NPI.UNKNOWN]),
+      this.encodeCString(params.source_addr, COctetMax.address),
+      Buffer.from([params.dest_addr_ton ?? TON.INTERNATIONAL]),
+      Buffer.from([params.dest_addr_npi ?? NPI.ISDN]),
+      this.encodeCString(params.destination_addr, COctetMax.address),
+      Buffer.from([params.esm_class ?? ESMClass.MODE_DEFAULT]),
+      Buffer.from([params.protocol_id ?? 0]),
+      Buffer.from([params.priority_flag ?? 0]),
+      this.encodeCString(params.schedule_delivery_time ?? '', COctetMax.time),
+      this.encodeCString(params.validity_period ?? '', COctetMax.time),
+      Buffer.from([params.registered_delivery ?? 0]),
+      Buffer.from([params.replace_if_present_flag ?? 0]),
+      Buffer.from([params.data_coding ?? DataCoding.SMSC_DEFAULT]),
+      Buffer.from([params.sm_default_msg_id ?? 0]),
       Buffer.from([sm_length]),
       messageBuffer,
       // Append optional TLVs
@@ -283,7 +322,7 @@ export class PDUEncoder {
     status: CommandStatus = CommandStatus.ESME_ROK
   ): Buffer {
     const header = this.createHeader(CommandId.DELIVER_SM_RESP, sequence_number, status);
-    const body = this.encodeCString(message_id);
+    const body = this.encodeCString(message_id, COctetMax.message_id);
     return this.finalizePDU(header, body);
   }
 
@@ -294,10 +333,10 @@ export class PDUEncoder {
   static encodeQuerySM(params: QuerySMParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.QUERY_SM, sequence_number);
     const body = Buffer.concat([
-      this.encodeCString(params.message_id),
+      this.encodeCString(params.message_id, COctetMax.message_id),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
+      this.encodeCString(params.source_addr, COctetMax.address),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -309,14 +348,14 @@ export class PDUEncoder {
   static encodeCancelSM(params: CancelSMParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.CANCEL_SM, sequence_number);
     const body = Buffer.concat([
-      this.encodeCString(params.service_type || ''),
-      this.encodeCString(params.message_id),
+      this.encodeCString(params.service_type ?? '', COctetMax.service_type),
+      this.encodeCString(params.message_id, COctetMax.message_id),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
+      this.encodeCString(params.source_addr, COctetMax.address),
       Buffer.from([params.dest_addr_ton]),
       Buffer.from([params.dest_addr_npi]),
-      this.encodeCString(params.destination_addr),
+      this.encodeCString(params.destination_addr, COctetMax.address),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -327,27 +366,37 @@ export class PDUEncoder {
    */
   static encodeReplaceSM(params: ReplaceSMParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.REPLACE_SM, sequence_number);
-    
+
+    const tlvs: TLV[] = [...(params.tlvs || [])];
+
+    // For content > 255 octets the spec requires message_payload with sm_length=0.
     let messageBuffer: Buffer;
-    if (typeof params.short_message === 'string') {
-      messageBuffer = Buffer.from(params.short_message, 'utf8');
+    let sm_length: number;
+    if (params.message_payload) {
+      messageBuffer = Buffer.alloc(0);
+      sm_length = 0;
+      tlvs.push({ tag: TLVTag.MESSAGE_PAYLOAD, value: params.message_payload });
     } else {
-      messageBuffer = params.short_message;
+      messageBuffer =
+        typeof params.short_message === 'string'
+          ? Buffer.from(params.short_message, 'utf8')
+          : params.short_message;
+      sm_length = Math.min(messageBuffer.length, 255);
+      messageBuffer = messageBuffer.slice(0, sm_length);
     }
-    const sm_length = Math.min(messageBuffer.length, 255);
-    messageBuffer = messageBuffer.slice(0, sm_length);
-    
+
     const body = Buffer.concat([
-      this.encodeCString(params.message_id),
+      this.encodeCString(params.message_id, COctetMax.message_id),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
-      this.encodeCString(params.schedule_delivery_time || ''),
-      this.encodeCString(params.validity_period || ''),
+      this.encodeCString(params.source_addr, COctetMax.address),
+      this.encodeCString(params.schedule_delivery_time || '', COctetMax.time),
+      this.encodeCString(params.validity_period || '', COctetMax.time),
       Buffer.from([params.registered_delivery]),
       Buffer.from([params.sm_default_msg_id]),
       Buffer.from([sm_length]),
       messageBuffer,
+      this.encodeTLVs(tlvs),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -358,25 +407,41 @@ export class PDUEncoder {
    */
   static encodeSubmitMulti(params: SubmitMultiParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.SUBMIT_MULTI, sequence_number);
-    
-    let messageBuffer: Buffer;
-    if (typeof params.short_message === 'string') {
-      messageBuffer = Buffer.from(params.short_message, 'utf8');
-    } else {
-      messageBuffer = params.short_message;
+
+    // number_of_dests is a single octet (1..255).
+    if (params.dest_addresses.length < 1 || params.dest_addresses.length > 255) {
+      throw new RangeError(
+        `submit_multi requires 1..255 destinations, got ${params.dest_addresses.length}`
+      );
     }
-    const sm_length = Math.min(messageBuffer.length, 255);
-    messageBuffer = messageBuffer.slice(0, sm_length);
-    
+
+    const tlvs: TLV[] = [...(params.tlvs || [])];
+
+    // For content > 255 octets the spec requires message_payload with sm_length=0.
+    let messageBuffer: Buffer;
+    let sm_length: number;
+    if (params.message_payload) {
+      messageBuffer = Buffer.alloc(0);
+      sm_length = 0;
+      tlvs.push({ tag: TLVTag.MESSAGE_PAYLOAD, value: params.message_payload });
+    } else {
+      messageBuffer =
+        typeof params.short_message === 'string'
+          ? Buffer.from(params.short_message, 'utf8')
+          : params.short_message;
+      sm_length = Math.min(messageBuffer.length, 255);
+      messageBuffer = messageBuffer.slice(0, sm_length);
+    }
+
     // Encode destination addresses
     const destBuffers = params.dest_addresses.map(dest => {
       if (dest.dest_flag === 1) {
         // SME address
         return Buffer.concat([
           Buffer.from([dest.dest_flag]),
-          Buffer.from([dest.dest_addr_ton || TON.UNKNOWN]),
-          Buffer.from([dest.dest_addr_npi || NPI.UNKNOWN]),
-          this.encodeCString(dest.destination_addr),
+          Buffer.from([dest.dest_addr_ton ?? TON.UNKNOWN]),
+          Buffer.from([dest.dest_addr_npi ?? NPI.UNKNOWN]),
+          this.encodeCString(dest.destination_addr, COctetMax.address),
         ]);
       } else {
         // Distribution list
@@ -386,25 +451,26 @@ export class PDUEncoder {
         ]);
       }
     });
-    
+
     const body = Buffer.concat([
-      this.encodeCString(params.service_type || ''),
+      this.encodeCString(params.service_type ?? '', COctetMax.service_type),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
+      this.encodeCString(params.source_addr, COctetMax.address),
       Buffer.from([params.dest_addresses.length]),  // number_of_dests
       ...destBuffers,
-      Buffer.from([params.esm_class || ESMClass.MODE_DEFAULT]),
-      Buffer.from([params.protocol_id || 0]),
-      Buffer.from([params.priority_flag || 0]),
-      this.encodeCString(params.schedule_delivery_time || ''),
-      this.encodeCString(params.validity_period || ''),
-      Buffer.from([params.registered_delivery || 0]),
-      Buffer.from([params.replace_if_present_flag || 0]),
-      Buffer.from([params.data_coding || DataCoding.SMSC_DEFAULT]),
-      Buffer.from([params.sm_default_msg_id || 0]),
+      Buffer.from([params.esm_class ?? ESMClass.MODE_DEFAULT]),
+      Buffer.from([params.protocol_id ?? 0]),
+      Buffer.from([params.priority_flag ?? 0]),
+      this.encodeCString(params.schedule_delivery_time ?? '', COctetMax.time),
+      this.encodeCString(params.validity_period ?? '', COctetMax.time),
+      Buffer.from([params.registered_delivery ?? 0]),
+      Buffer.from([params.replace_if_present_flag ?? 0]),
+      Buffer.from([params.data_coding ?? DataCoding.SMSC_DEFAULT]),
+      Buffer.from([params.sm_default_msg_id ?? 0]),
       Buffer.from([sm_length]),
       messageBuffer,
+      this.encodeTLVs(tlvs),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -417,18 +483,36 @@ export class PDUEncoder {
     const header = this.createHeader(CommandId.DATA_SM, sequence_number);
     
     const body = Buffer.concat([
-      this.encodeCString(params.service_type || ''),
+      this.encodeCString(params.service_type ?? '', COctetMax.service_type),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
+      this.encodeCString(params.source_addr, COctetMax.address),
       Buffer.from([params.dest_addr_ton]),
       Buffer.from([params.dest_addr_npi]),
-      this.encodeCString(params.destination_addr),
-      Buffer.from([params.esm_class || ESMClass.MODE_DEFAULT]),
-      Buffer.from([params.registered_delivery || 0]),
-      Buffer.from([params.data_coding || DataCoding.SMSC_DEFAULT]),
-      // TLVs for message content
+      this.encodeCString(params.destination_addr, COctetMax.address),
+      Buffer.from([params.esm_class ?? ESMClass.MODE_DEFAULT]),
+      Buffer.from([params.registered_delivery ?? 0]),
+      Buffer.from([params.data_coding ?? DataCoding.SMSC_DEFAULT]),
+      // TLVs for message content (message_payload is the only means of text in data_sm)
       this.encodeTLVs(params.tlvs || []),
+    ]);
+    return this.finalizePDU(header, body);
+  }
+
+  /**
+   * Encode DATA_SM_RESP PDU (response to an MC-initiated data_sm)
+   * SMPP v5 Spec Section 4.7.2, Table 4-17
+   */
+  static encodeDataSMResp(
+    sequence_number: number,
+    message_id: string = '',
+    status: CommandStatus = CommandStatus.ESME_ROK,
+    tlvs: TLV[] = []
+  ): Buffer {
+    const header = this.createHeader(CommandId.DATA_SM_RESP, sequence_number, status);
+    const body = Buffer.concat([
+      this.encodeCString(message_id, COctetMax.message_id),
+      this.encodeTLVs(tlvs),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -440,8 +524,8 @@ export class PDUEncoder {
   static encodeOutbind(params: OutbindParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.OUTBIND, sequence_number);
     const body = Buffer.concat([
-      this.encodeCString(params.system_id),
-      this.encodeCString(params.password),
+      this.encodeCString(params.system_id, COctetMax.system_id),
+      this.encodeCString(params.password, COctetMax.password),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -455,8 +539,21 @@ export class PDUEncoder {
     
     // Build TLV list (broadcast operations are TLV-heavy)
     const tlvs: TLV[] = [...(params.tlvs || [])];
-    
-    // Add required broadcast TLVs
+
+    // broadcast_area_identifier and broadcast_content_type are mandatory for
+    // broadcast_sm (Table 4-26). Accept them either as convenience fields or as
+    // explicit TLVs, but require both to be present.
+    const hasTlv = (tag: number) =>
+      tlvs.some(t => t.tag === tag) ||
+      (tag === TLVTag.BROADCAST_AREA_IDENTIFIER && !!params.broadcast_area_identifier) ||
+      (tag === TLVTag.BROADCAST_CONTENT_TYPE && !!params.broadcast_content_type);
+    if (!hasTlv(TLVTag.BROADCAST_AREA_IDENTIFIER) || !hasTlv(TLVTag.BROADCAST_CONTENT_TYPE)) {
+      throw new Error(
+        'broadcast_sm requires broadcast_area_identifier and broadcast_content_type'
+      );
+    }
+
+    // Add convenience broadcast TLVs
     if (params.broadcast_area_identifier) {
       tlvs.push({ tag: TLVTag.BROADCAST_AREA_IDENTIFIER, value: params.broadcast_area_identifier });
     }
@@ -474,19 +571,19 @@ export class PDUEncoder {
     if (params.message_payload) {
       tlvs.push({ tag: TLVTag.MESSAGE_PAYLOAD, value: params.message_payload });
     }
-    
+
     const body = Buffer.concat([
-      this.encodeCString(params.service_type || ''),
+      this.encodeCString(params.service_type ?? '', COctetMax.service_type),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
-      this.encodeCString(params.message_id),
-      Buffer.from([params.priority_flag || 0]),
-      this.encodeCString(params.schedule_delivery_time || ''),
-      this.encodeCString(params.validity_period || ''),
-      Buffer.from([params.replace_if_present_flag || 0]),
-      Buffer.from([params.data_coding || DataCoding.SMSC_DEFAULT]),
-      Buffer.from([params.sm_default_msg_id || 0]),
+      this.encodeCString(params.source_addr, COctetMax.address),
+      this.encodeCString(params.message_id, COctetMax.message_id),
+      Buffer.from([params.priority_flag ?? 0]),
+      this.encodeCString(params.schedule_delivery_time ?? '', COctetMax.time),
+      this.encodeCString(params.validity_period ?? '', COctetMax.time),
+      Buffer.from([params.replace_if_present_flag ?? 0]),
+      Buffer.from([params.data_coding ?? DataCoding.SMSC_DEFAULT]),
+      Buffer.from([params.sm_default_msg_id ?? 0]),
       // Broadcast operations use TLVs for message content
       this.encodeTLVs(tlvs),
     ]);
@@ -500,10 +597,10 @@ export class PDUEncoder {
   static encodeQueryBroadcastSM(params: QueryBroadcastSMParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.QUERY_BROADCAST_SM, sequence_number);
     const body = Buffer.concat([
-      this.encodeCString(params.message_id),
+      this.encodeCString(params.message_id, COctetMax.message_id),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
+      this.encodeCString(params.source_addr, COctetMax.address),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -515,11 +612,11 @@ export class PDUEncoder {
   static encodeCancelBroadcastSM(params: CancelBroadcastSMParams, sequence_number: number): Buffer {
     const header = this.createHeader(CommandId.CANCEL_BROADCAST_SM, sequence_number);
     const body = Buffer.concat([
-      this.encodeCString(params.service_type || ''),
-      this.encodeCString(params.message_id),
+      this.encodeCString(params.service_type ?? '', COctetMax.service_type),
+      this.encodeCString(params.message_id, COctetMax.message_id),
       Buffer.from([params.source_addr_ton]),
       Buffer.from([params.source_addr_npi]),
-      this.encodeCString(params.source_addr),
+      this.encodeCString(params.source_addr, COctetMax.address),
     ]);
     return this.finalizePDU(header, body);
   }
@@ -545,19 +642,26 @@ export class PDUDecoder {
    * Decode C-string from buffer
    */
   private static decodeCString(buffer: Buffer, offset: number): { value: string; length: number } {
+    // Guard against reads at/after the end of a truncated body.
+    if (offset >= buffer.length) {
+      return { value: '', length: 0 };
+    }
     let end = offset;
     while (end < buffer.length && buffer[end] !== 0) {
       end++;
     }
     const value = buffer.toString('ascii', offset, end);
-    return { value, length: end - offset + 1 }; // +1 for null terminator
+    // Count the NULL terminator only if one was actually present; a string that
+    // runs to the end of the buffer without a terminator consumes only its bytes.
+    const length = end < buffer.length ? end - offset + 1 : end - offset;
+    return { value, length };
   }
 
   /**
    * Decode PDU header
    */
   static decodePDUHeader(buffer: Buffer): PDU | null {
-    if (buffer.length < 16) {
+    if (buffer.length < SMPP_HEADER_LENGTH) {
       return null;
     }
 
@@ -566,11 +670,23 @@ export class PDUDecoder {
     const command_status = buffer.readUInt32BE(8);
     const sequence_number = buffer.readUInt32BE(12);
 
-    if (buffer.length < command_length) {
-      return null; // Incomplete PDU
+    // Reject structurally invalid lengths BEFORE any framing decision. A
+    // command_length below the 16-octet header (e.g. 0) would otherwise let the
+    // caller advance zero bytes and spin forever; an absurd length would drive
+    // unbounded buffering. Per spec the peer must be answered with a
+    // generic_nack/ESME_RINVCMDLEN and the connection torn down - the caller
+    // turns this thrown error into exactly that.
+    if (command_length < SMPP_HEADER_LENGTH || command_length > MAX_PDU_LENGTH) {
+      throw new InvalidPDUError(
+        `Invalid command_length ${command_length} (must be ${SMPP_HEADER_LENGTH}..${MAX_PDU_LENGTH})`
+      );
     }
 
-    if (command_length > 16) {
+    if (buffer.length < command_length) {
+      return null; // Incomplete PDU - wait for more data
+    }
+
+    if (command_length > SMPP_HEADER_LENGTH) {
       return {
         command_length,
         command_id,
@@ -690,9 +806,12 @@ export class PDUDecoder {
     if (sm_length === undefined) return null;
     offset++;
 
-    // short_message
-    const short_message = body.slice(offset, offset + sm_length);
-    offset += sm_length;
+    // short_message - clamp to the bytes actually available so a bogus
+    // sm_length cannot overshoot and silently drop the trailing TLVs.
+    const available = Math.max(0, body.length - offset);
+    const actualLen = Math.min(sm_length, available);
+    const short_message = body.slice(offset, offset + actualLen);
+    offset += actualLen;
 
     // Optional TLVs may follow (SMPP v5 Spec Section 4.3.1, Table 4-24)
     const tlvs = offset < body.length ? this.decodeTLVs(body, offset) : [];
@@ -709,20 +828,20 @@ export class PDUDecoder {
     // Build result object with all fields at once (readonly properties)
     const result: DeliverSMParams = {
       service_type: service_type_result.value,
-      source_addr_ton: source_addr_ton as TON,
-      source_addr_npi: source_addr_npi as NPI,
+      source_addr_ton: (source_addr_ton ?? 0) as TON,
+      source_addr_npi: (source_addr_npi ?? 0) as NPI,
       source_addr: source_addr_result.value,
-      dest_addr_ton: dest_addr_ton as TON,
-      dest_addr_npi: dest_addr_npi as NPI,
+      dest_addr_ton: (dest_addr_ton ?? 0) as TON,
+      dest_addr_npi: (dest_addr_npi ?? 0) as NPI,
       destination_addr: dest_addr_result.value,
-      esm_class: esm_class as ESMClassValue,
+      esm_class: (esm_class ?? 0) as ESMClassValue,
       protocol_id: protocol_id ?? 0,
       priority_flag: priority_flag ?? 0,
       schedule_delivery_time: schedule_delivery_time_result.value,
       validity_period: validity_period_result.value,
       registered_delivery: registered_delivery ?? 0,
       replace_if_present_flag: replace_if_present_flag ?? 0,
-      data_coding: data_coding as DataCoding,
+      data_coding: (data_coding ?? 0) as DataCoding,
       sm_default_msg_id: sm_default_msg_id ?? 0,
       sm_length,
       short_message,
@@ -738,6 +857,53 @@ export class PDUDecoder {
     };
     
     return result;
+  }
+
+  /**
+   * Decode DATA_SM PDU (MC-initiated delivery request received by the ESME)
+   * SMPP v5 Spec Section 4.7.1, Table 4-16
+   */
+  static decodeDataSM(pdu: PDU): DataSMParams | null {
+    if (!pdu.body) {
+      return null;
+    }
+
+    let offset = 0;
+    const body = pdu.body;
+
+    const service_type_result = this.decodeCString(body, offset);
+    offset += service_type_result.length;
+
+    const source_addr_ton = body[offset++];
+    const source_addr_npi = body[offset++];
+    const source_addr_result = this.decodeCString(body, offset);
+    offset += source_addr_result.length;
+
+    const dest_addr_ton = body[offset++];
+    const dest_addr_npi = body[offset++];
+    const dest_addr_result = this.decodeCString(body, offset);
+    offset += dest_addr_result.length;
+
+    const esm_class = body[offset++];
+    const registered_delivery = body[offset++];
+    const data_coding = body[offset++];
+
+    // data_sm conveys its message content (if any) via TLVs (message_payload).
+    const tlvs = offset < body.length ? this.decodeTLVs(body, offset) : [];
+
+    return {
+      service_type: service_type_result.value,
+      source_addr_ton: (source_addr_ton ?? 0) as TON,
+      source_addr_npi: (source_addr_npi ?? 0) as NPI,
+      source_addr: source_addr_result.value,
+      dest_addr_ton: (dest_addr_ton ?? 0) as TON,
+      dest_addr_npi: (dest_addr_npi ?? 0) as NPI,
+      destination_addr: dest_addr_result.value,
+      esm_class: (esm_class ?? 0) as ESMClassValue,
+      registered_delivery: registered_delivery ?? 0,
+      data_coding: (data_coding ?? 0) as DataCoding,
+      ...(tlvs.length > 0 && { tlvs }),
+    };
   }
 
   /**
@@ -809,29 +975,10 @@ export class PDUDecoder {
    * Get status name from status code
    */
   static getStatusName(status: number): string {
-    const names: Record<number, string> = {
-      [CommandStatus.ESME_ROK]: 'ESME_ROK',
-      [CommandStatus.ESME_RINVMSGLEN]: 'ESME_RINVMSGLEN',
-      [CommandStatus.ESME_RINVCMDLEN]: 'ESME_RINVCMDLEN',
-      [CommandStatus.ESME_RINVCMDID]: 'ESME_RINVCMDID',
-      [CommandStatus.ESME_RINVBNDSTS]: 'ESME_RINVBNDSTS',
-      [CommandStatus.ESME_RALYBND]: 'ESME_RALYBND',
-      [CommandStatus.ESME_RINVPRTFLG]: 'ESME_RINVPRTFLG',
-      [CommandStatus.ESME_RINVREGDLVFLG]: 'ESME_RINVREGDLVFLG',
-      [CommandStatus.ESME_RSYSERR]: 'ESME_RSYSERR',
-      [CommandStatus.ESME_RINVSRCADR]: 'ESME_RINVSRCADR',
-      [CommandStatus.ESME_RINVDSTADR]: 'ESME_RINVDSTADR',
-      [CommandStatus.ESME_RINVMSGID]: 'ESME_RINVMSGID',
-      [CommandStatus.ESME_RBINDFAIL]: 'ESME_RBINDFAIL',
-      [CommandStatus.ESME_RINVPASWD]: 'ESME_RINVPASWD',
-      [CommandStatus.ESME_RINVSYSID]: 'ESME_RINVSYSID',
-      [CommandStatus.ESME_RCANCELFAIL]: 'ESME_RCANCELFAIL',
-      [CommandStatus.ESME_RREPLACEFAIL]: 'ESME_RREPLACEFAIL',
-      [CommandStatus.ESME_RMSGQFUL]: 'ESME_RMSGQFUL',
-      [CommandStatus.ESME_RINVSERTYP]: 'ESME_RINVSERTYP',
-      [CommandStatus.ESME_RTHROTTLED]: 'ESME_RTHROTTLED',
-    };
-    return names[status] || `UNKNOWN(0x${status.toString(16)})`;
+    // CommandStatus is a numeric enum, so the reverse mapping yields the name
+    // for every spec-defined code (not just a hand-maintained subset).
+    const name = CommandStatus[status];
+    return name ?? `UNKNOWN(0x${status.toString(16).toUpperCase().padStart(8, '0')})`;
   }
 
   /**
@@ -888,12 +1035,15 @@ export class PDUDecoder {
       const dest_addr_result = this.decodeCString(body, offset);
       offset += dest_addr_result.length;
 
+      // Stop if the (untrusted) no_unsuccess count over-claims and there aren't
+      // 4 octets left for error_status_code - avoids a RangeError throw.
+      if (offset + 4 > body.length) break;
       const error_status_code = body.readUInt32BE(offset);
       offset += 4;
 
       unsuccessful_smes.push({
-        dest_addr_ton: dest_addr_ton as TON,
-        dest_addr_npi: dest_addr_npi as NPI,
+        dest_addr_ton: (dest_addr_ton ?? 0) as TON,
+        dest_addr_npi: (dest_addr_npi ?? 0) as NPI,
         destination_addr: dest_addr_result.value,
         error_status_code,
       });
@@ -951,11 +1101,11 @@ export class PDUDecoder {
     const tlvs = offset < body.length ? this.decodeTLVs(body, offset) : [];
 
     return {
-      source_addr_ton: source_addr_ton as TON,
-      source_addr_npi: source_addr_npi as NPI,
+      source_addr_ton: (source_addr_ton ?? 0) as TON,
+      source_addr_npi: (source_addr_npi ?? 0) as NPI,
       source_addr: source_addr_result.value,
-      esme_addr_ton: esme_addr_ton as TON,
-      esme_addr_npi: esme_addr_npi as NPI,
+      esme_addr_ton: (esme_addr_ton ?? 0) as TON,
+      esme_addr_npi: (esme_addr_npi ?? 0) as NPI,
       esme_addr: esme_addr_result.value,
       ...(tlvs.length > 0 && { tlvs }),
     };
@@ -1011,14 +1161,19 @@ export class PDUDecoder {
     const message_id_result = this.decodeCString(pdu.body, offset);
     offset += message_id_result.length;
 
-    const message_state = pdu.body[offset++];
-
-    // Optional TLVs may follow
+    // In query_broadcast_sm_resp, message_state is a TLV (0x0427), NOT a fixed
+    // mandatory octet. Everything after message_id is the TLV stream (which also
+    // carries broadcast_area_identifier 0x0606 and broadcast_area_success 0x0608).
     const tlvs = offset < pdu.body.length ? this.decodeTLVs(pdu.body, offset) : [];
+    const messageStateTlv = tlvs.find(t => t.tag === TLVTag.MESSAGE_STATE);
+    const message_state =
+      messageStateTlv && messageStateTlv.value.length > 0
+        ? messageStateTlv.value.readUInt8(0)
+        : 0;
 
     return {
       message_id: message_id_result.value,
-      message_state: message_state ?? 0,
+      message_state,
       ...(tlvs.length > 0 && { tlvs }),
     };
   }

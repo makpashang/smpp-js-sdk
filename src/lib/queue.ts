@@ -4,7 +4,15 @@
  */
 
 import { EventEmitter } from "node:events";
-import type { SubmitSMParams } from "./types.js";
+import type { SubmitSMParams, Logger } from "./types.js";
+
+/** No-op logger used when the caller does not inject one. */
+const NOOP_LOGGER: Logger = {
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+};
 
 export interface SMSMessage {
   readonly id?: string;
@@ -65,6 +73,7 @@ export interface MessageQueueConfig {
   readonly maxSize?: number;
   readonly maxRetries?: number;
   readonly retryDelay?: number;
+  readonly logger?: Logger;
 }
 
 /**
@@ -144,10 +153,13 @@ export class RateLimiter {
  * Message Queue with Priority and Retry Support
  */
 export class MessageQueue extends EventEmitter {
-  readonly #config: Required<MessageQueueConfig>;
+  readonly #config: Required<Omit<MessageQueueConfig, "logger">>;
+  readonly #logger: Logger;
   readonly #queue: QueuedMessage[] = [];
   readonly #processing = new Map<string, QueuedMessage>();
   #messageIdCounter = 0;
+  #sentCount = 0;
+  #failedCount = 0;
 
   constructor(config: MessageQueueConfig = {}) {
     super();
@@ -157,14 +169,25 @@ export class MessageQueue extends EventEmitter {
       maxRetries: config.maxRetries ?? 3,
       retryDelay: config.retryDelay ?? 1000,
     };
+    this.#logger = config.logger ?? NOOP_LOGGER;
   }
 
   /**
    * Enqueue a message
    */
-  enqueue(params: SubmitSMParams, priority: number = 1): string {
-    if (this.#queue.length >= this.#config.maxSize) {
-      throw new Error("Queue is full");
+  /**
+   * Enqueue a message. Resolves with the SMSC message_id once the message is
+   * successfully submitted (via markSuccess), or rejects if it permanently fails.
+   */
+  enqueue(params: SubmitSMParams, priority: number = 1): Promise<string> {
+    // Count both waiting and in-flight messages against the cap.
+    if (this.#queue.length + this.#processing.size >= this.#config.maxSize) {
+      this.#logger.warn("MessageQueue full - rejecting enqueue", {
+        maxSize: this.#config.maxSize,
+        queued: this.#queue.length,
+        processing: this.#processing.size,
+      });
+      return Promise.reject(new Error("Queue is full"));
     }
 
     const id = this.#generateId();
@@ -176,7 +199,7 @@ export class MessageQueue extends EventEmitter {
       retryCount: 0,
     };
 
-    return new Promise((resolve, reject) => {
+    return new Promise<string>((resolve, reject) => {
       message.resolve = resolve;
       message.reject = reject;
 
@@ -189,7 +212,7 @@ export class MessageQueue extends EventEmitter {
       }
 
       this.emit("enqueued", { id, priority, queueSize: this.#queue.length });
-    }) as unknown as string;
+    });
   }
 
   /**
@@ -213,8 +236,31 @@ export class MessageQueue extends EventEmitter {
    */
   markSuccess(message: QueuedMessage, messageId: string): void {
     this.#processing.delete(message.id);
+    this.#sentCount++;
+    this.#logger.debug("MessageQueue: message succeeded", {
+      id: message.id,
+      messageId,
+      attempts: message.retryCount + 1,
+    });
     message.resolve?.(messageId);
     this.emit("success", { id: message.id, messageId });
+  }
+
+  /**
+   * Mark a message as permanently failed: remove it from processing and REJECT
+   * the caller's promise (never resolve it). Use this for non-retryable errors
+   * instead of markSuccess(message, '') which would resolve with a fake id.
+   */
+  markFailed(message: QueuedMessage, error: Error): void {
+    this.#processing.delete(message.id);
+    this.#failedCount++;
+    this.#logger.warn("MessageQueue: message failed permanently", {
+      id: message.id,
+      error: error.message,
+      attempts: message.retryCount + 1,
+    });
+    message.reject?.(error);
+    this.emit("failed", { id: message.id, error: error.message });
   }
 
   /**
@@ -226,6 +272,13 @@ export class MessageQueue extends EventEmitter {
     message.lastError = error;
 
     if (message.retryCount >= this.#config.maxRetries) {
+      this.#failedCount++;
+      this.#logger.warn("MessageQueue: message exhausted retries", {
+        id: message.id,
+        error,
+        attempts: message.retryCount,
+        maxRetries: this.#config.maxRetries,
+      });
       message.reject?.(
         new Error(`Failed after ${this.#config.maxRetries} attempts: ${error}`)
       );
@@ -236,6 +289,13 @@ export class MessageQueue extends EventEmitter {
       });
       return;
     }
+
+    this.#logger.debug("MessageQueue: scheduling retry", {
+      id: message.id,
+      error,
+      attempt: message.retryCount,
+      maxRetries: this.#config.maxRetries,
+    });
 
     // Re-add to queue with delay
     setTimeout(
@@ -280,9 +340,13 @@ export class MessageQueue extends EventEmitter {
     return {
       queued: this.#queue.length,
       sending: this.#processing.size,
-      sent: 0, // Would need to track this separately
-      failed: 0, // Would need to track this separately
-      total: this.#queue.length + this.#processing.size,
+      sent: this.#sentCount,
+      failed: this.#failedCount,
+      total:
+        this.#queue.length +
+        this.#processing.size +
+        this.#sentCount +
+        this.#failedCount,
     };
   }
 
@@ -340,6 +404,9 @@ export class SMSQueue extends EventEmitter {
     this.#resetTimer = setInterval(() => {
       this.#sendCount = 0;
     }, 1000);
+    // Don't let this housekeeping timer keep the Node process alive on its own;
+    // callers should still call destroy() for a clean shutdown.
+    this.#resetTimer.unref?.();
   }
 
   add(message: SMSMessage): string {
@@ -466,7 +533,8 @@ export class SMSQueue extends EventEmitter {
     const msg = this.getMessage(id);
     if (!msg) return;
 
-    msg.attempts++;
+    // Note: attempts was already incremented in getNext() when the message was
+    // dispatched, so we do NOT increment again here (that would halve the budget).
     msg.lastAttempt = new Date();
     msg.error = error;
 
@@ -542,7 +610,7 @@ export class SMSQueue extends EventEmitter {
   }
 
   #generateId(): string {
-    return `sms_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `sms_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
   }
 
   destroy(): void {

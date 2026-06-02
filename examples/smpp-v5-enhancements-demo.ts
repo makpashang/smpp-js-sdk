@@ -207,7 +207,7 @@ async function main() {
   console.log("\nExample: Delivery receipt + SME delivery acknowledgement");
   const esmWithAck = ESMClass.combine(
     ESMClass.MC_DELIVERY_RECEIPT,
-    ESMClass.SME_DELIVERY_ACK
+    ESMClass.DELIVERY_ACKNOWLEDGEMENT
   );
   console.log(`  ESM Class: 0x${esmWithAck.toString(16).padStart(2, "0")} (${esmWithAck.toString(2).padStart(8, "0")})`);
   console.log(`  Breakdown:`);
@@ -218,9 +218,11 @@ async function main() {
 
   // Example 4c: Full feature set
   console.log("\nExample: Full feature set");
+  // Note: in esm_class the message-type field (bits 2-5) is mutually exclusive,
+  // so these are illustrative of the bit helpers rather than a single valid combo.
   const esmFull = ESMClass.combine(
     ESMClass.MC_DELIVERY_RECEIPT,
-    ESMClass.SME_BOTH_ACK,
+    ESMClass.MANUAL_USER_ACKNOWLEDGEMENT,
     ESMClass.INTERMEDIATE_NOTIFICATION
   );
   console.log(`  ESM Class: 0x${esmFull.toString(16).padStart(2, "0")} (${esmFull.toString(2).padStart(8, "0")})`);

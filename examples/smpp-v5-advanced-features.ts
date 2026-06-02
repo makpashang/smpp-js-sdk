@@ -201,28 +201,22 @@ async function main() {
   console.log("Broadcast Area Format defines geographic areas for Cell Broadcast\n");
 
   // Example 3a: Broadcast Area Format Reference
-  console.log("Broadcast Area Format Types (SMPP v5 Spec Section 4.8.4.4.1):");
+  // SMPP v5 Table 4-65 defines exactly three formats; all other values are reserved.
+  console.log("Broadcast Area Format Types (SMPP v5 Spec Table 4-65):");
   console.log("┌──────┬──────────────────────┬────────────────────────────────────┐");
   console.log("│ Code │ Format Type          │ Description                        │");
   console.log("├──────┼──────────────────────┼────────────────────────────────────┤");
-  console.log(`│ 0x${BroadcastAreaFormat.ALIAS_NAME.toString(16).padStart(2, "0").toUpperCase()} │ ALIAS_NAME           │ Alias name for broadcast area      │`);
+  console.log(`│ 0x${BroadcastAreaFormat.ALIAS_NAME.toString(16).padStart(2, "0").toUpperCase()} │ ALIAS_NAME           │ Alias (geographic name)            │`);
   console.log(`│ 0x${BroadcastAreaFormat.ELLIPSOID_ARC.toString(16).padStart(2, "0").toUpperCase()} │ ELLIPSOID_ARC        │ Ellipsoid arc (center + radius)    │`);
   console.log(`│ 0x${BroadcastAreaFormat.POLYGON.toString(16).padStart(2, "0").toUpperCase()} │ POLYGON              │ Polygon area (coordinates)         │`);
-  console.log(`│ 0x${BroadcastAreaFormat.CELL_ID.toString(16).padStart(2, "0").toUpperCase()} │ CELL_ID              │ GSM/UMTS Cell ID                   │`);
-  console.log(`│ 0x${BroadcastAreaFormat.LOCATION_AREA.toString(16).padStart(2, "0").toUpperCase()} │ LOCATION_AREA        │ Location Area Code (LAC)           │`);
-  console.log(`│ 0x${BroadcastAreaFormat.ROUTING_AREA.toString(16).padStart(2, "0").toUpperCase()} │ ROUTING_AREA         │ Routing Area Code (RAC)            │`);
-  console.log(`│ 0x${BroadcastAreaFormat.SERVICE_AREA.toString(16).padStart(2, "0").toUpperCase()} │ SERVICE_AREA         │ Service Area Code (SAC)            │`);
-  console.log(`│ 0x${BroadcastAreaFormat.CDMA_CGI.toString(16).padStart(2, "0").toUpperCase()} │ CDMA_CGI             │ CDMA Cell Global ID                │`);
-  console.log(`│ 0x${BroadcastAreaFormat.CDMA_SID_NID.toString(16).padStart(2, "0").toUpperCase()} │ CDMA_SID_NID         │ CDMA System ID / Network ID        │`);
-  console.log(`│ 0x${BroadcastAreaFormat.UTRAN_CELL_ID.toString(16).padStart(2, "0").toUpperCase()} │ UTRAN_CELL_ID        │ UTRAN Cell ID                      │`);
-  console.log(`│ 0x${BroadcastAreaFormat.LAI.toString(16).padStart(2, "0").toUpperCase()} │ LAI                  │ Location Area Identification       │`);
-  console.log("└──────┴──────────────────────┴────────────────────────────────────┘\n");
+  console.log("└──────┴──────────────────────┴────────────────────────────────────┘");
+  console.log("(0x03-0xFF are reserved)\n");
 
   console.log("Usage Example (for broadcast_sm operations):");
   console.log("```typescript");
-  console.log("// Define broadcast area using Cell ID format");
+  console.log("// Define broadcast area using Polygon format");
   console.log("const broadcastArea = {");
-  console.log("  format: BroadcastAreaFormat.CELL_ID,");
+  console.log("  format: BroadcastAreaFormat.POLYGON,");
   console.log("  details: Buffer.from([0x01, 0x23, 0x45]), // Cell ID data");
   console.log("};");
   console.log("");
